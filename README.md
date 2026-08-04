@@ -7,6 +7,20 @@ propia GPU (NVIDIA RTX 4070 + CUDA). Todo local: ninguna foto sale de tu PC.
 
 Doble clic en **PhotoRAW.bat** (en esta carpeta).
 
+## Instalar desde cero (repositorio recién clonado)
+
+```bash
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+```
+
+Los modelos de IA **no están en el repositorio** (son ~3,3 GB). Abre
+PhotoRAW y pulsa **Modelos de IA** en la barra de herramientas: ahí ves
+las 9 IAs del proyecto, cuáles faltan y cuánto pesa cada una, y las bajas
+de una en una (o todas de golpe) según lo que vayas a usar. Quedan en
+`~/.photoraw/models`. Desde esa misma ventana puedes borrar las que no
+uses para recuperar el espacio.
+
 ## Lo que ya tiene
 
 ### Revelado (pestaña Revelar)
@@ -73,8 +87,9 @@ verticales…), enderezar ±45°, girar 90° y voltear. No destructivo.
 | Superresolución | Real-ESRGAN x4 | Exporta a 2× o 4× reconstruyendo detalle |
 | Borrado generativo | Realistic Vision (difusión) | Reconstruye el fondo tras quitar personas/objetos |
 
-Los modelos se descargan una sola vez al usarlos y quedan en
-`~/.photoraw/models`.
+Los modelos se descargan una sola vez (al usarlos, o desde la ventana
+**Modelos de IA** de la barra) y quedan en `~/.photoraw/models`. Esa
+ventana es también donde ves cuánto ocupan y puedes borrar los que no uses.
 
 ### Flujo de trabajo
 - **Original** (tecla `O`): antes/después instantáneo.
@@ -167,8 +182,9 @@ photoraw/
   face_parse.py  BiSeNet (máscaras de retrato: piel, pelo, ojos...)
   generative.py  borrado generativo (difusión) + afinado Real-ESRGAN
   upscale.py     Real-ESRGAN (superresolución)
+  models.py      catálogo de las IAs descargables (AI_MODELS)
   ui/            PySide6: ventana principal, visor con zoom/recorte/máscaras,
-                 editor de curvas
+                 editor de curvas, ventana de modelos de IA
 ```
 
 
@@ -266,6 +282,19 @@ photoraw/
   temporizador de `IDLE_FREE_MIN` = 5 min sin IA. Efecto secundario bueno:
   con más VRAM libre, `_pick_size` puede elegir 640 px en vez de 512 y el
   borrado sale con mejor textura.
+- **Ventana «Modelos de IA»** (botón de la barra, al lado de Detener IA):
+  catálogo en `photoraw/models.py` (`AI_MODELS`) + `ui/models_dialog.py`,
+  que se dibuja solo a partir de la lista — para añadir una IA basta con
+  sumar una entrada. Muestra las 9 IAs con lo que hace cada una, su peso y
+  si está instalada; descarga en segundo plano (con barra por fila) y
+  botón de eliminar por modelo. Objetivo: el repo no lleva los 3,3 GB, se
+  clona, se instalan requirements y cada uno baja lo que use.
+  Trampa de layout ya resuelta: las `QLabel` de la fila necesitan
+  `setWordWrap(True)` **y** `setMinimumWidth(1)`, o el texto más largo fija
+  el ancho mínimo (872 px medidos) y los botones se salen de la ventana.
+- **Detener IA se puede pulsar siempre**: en reposo avisa de que no hay
+  nada corriendo y suelta los modelos de la GPU. Antes se quedaba en gris
+  y desde fuera parecía que el botón «no hacía nada».
 
 **Falta que Héctor pruebe** (reiniciar PhotoRAW primero): repasar el
 corrector en la nariz (borrar los trazos feos y volver a pintar), abrir una

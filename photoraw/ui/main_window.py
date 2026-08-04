@@ -2225,9 +2225,16 @@ class MainWindow(QMainWindow):
             "borrado generativo, máscaras). Atajo: Esc.\n"
             "La tarjeta gráfica puede tardar unos segundos en soltar el\n"
             "último paso; lo calculado a medias se descarta.")
-        self.a_stop_ai.setEnabled(False)
         self.a_stop_ai.triggered.connect(self.cancel_ai)
         tb.addAction(self.a_stop_ai)
+
+        a_models = QAction(icon("mdi6.brain"), "Modelos de IA", self)
+        a_models.setToolTip(
+            "Qué IAs tiene PhotoRAW, cuáles están descargadas y cuánto\n"
+            "ocupan. Desde ahí puedes bajar las que falten o borrar las\n"
+            "que no uses.")
+        a_models.triggered.connect(self.show_models)
+        tb.addAction(a_models)
 
     # ---------- carpeta y miniaturas ----------
 
@@ -2582,7 +2589,12 @@ class MainWindow(QMainWindow):
         guardados (ruido, rostros, mascaras) se relanzarian solos al llegar
         el resultado vacio y volveriamos a empezar."""
         if not self._ai_busy():
-            self.statusBar().showMessage("No hay ningún trabajo de IA en marcha")
+            # nada que parar: al menos devolvemos la tarjeta grafica, que es
+            # lo otro que se suele querer al pulsar aqui
+            self.free_gpu(quiet=True)
+            self.statusBar().showMessage(
+                "No hay ningún trabajo de IA en marcha — modelos "
+                "descargados de la tarjeta gráfica")
             return
         self.ai_cancel["stop"] = True
         self.ai_cancel = {"stop": False}   # los proximos trabajos, limpios
@@ -2616,6 +2628,17 @@ class MainWindow(QMainWindow):
                 "descargados de la tarjeta gráfica (se recargan solos "
                 "cuando los vuelvas a usar)")
 
+    def show_models(self):
+        """Ventana con todas las IAs del proyecto: cuales estan descargadas,
+        cuanto ocupan, y botones para bajarlas o borrarlas."""
+        from photoraw.ui.models_dialog import ModelsDialog
+        if getattr(self, "_models_dialog", None) is None:
+            self._models_dialog = ModelsDialog(self)
+        self._models_dialog.refrescar()
+        self._models_dialog.show()
+        self._models_dialog.raise_()
+        self._models_dialog.activateWindow()
+
     def _touch_ai_idle(self):
         """Reinicia la cuenta atras para devolver la GPU. Se llama cada vez
         que termina un trabajo: mientras encadenes ediciones con IA los
@@ -2634,9 +2657,12 @@ class MainWindow(QMainWindow):
         self.busy_bar.setVisible(working)
         # el boton de la barra solo se puede pulsar (y se pone rojo) cuando
         # hay IA que detener; el decodificado no cuenta, no se puede parar
+        # el boton se pone rojo cuando hay IA que detener, pero se puede
+        # pulsar siempre: en reposo te dice que no hay nada corriendo y te
+        # devuelve la tarjeta grafica (antes parecia que "no hacia nada")
         stoppable = bool(self._ai_busy())
-        if self.a_stop_ai.isEnabled() != stoppable:
-            self.a_stop_ai.setEnabled(stoppable)
+        if getattr(self, "_stop_red", None) != stoppable:
+            self._stop_red = stoppable
             self.a_stop_ai.setIcon(self._stop_icon_busy if stoppable
                                    else self._stop_icon_idle)
         if working:
