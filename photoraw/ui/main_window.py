@@ -2628,6 +2628,34 @@ class MainWindow(QMainWindow):
                 "descargados de la tarjeta gráfica (se recargan solos "
                 "cuando los vuelvas a usar)")
 
+    def warm_up_heal(self):
+        """Deja el corrector listo ANTES de que pintes.
+
+        Crear la sesion de LaMa tarda ~11 s (medido) y, mientras lo hace,
+        bloquea el interprete: la ventana se queda congelada aunque el
+        trabajo corra en segundo plano. Antes eso pasaba justo despues de
+        soltar el primer trazo — pintabas y la app se moria un rato, que es
+        lo mas desconcertante posible. Ahora el peaje se paga al ELEGIR la
+        herramienta, avisando de lo que va a ocurrir, y el primer trazo ya
+        sale en ~1 s. Una sola vez por sesion."""
+        if heal._session is not None or not heal.model_available():
+            return
+        aviso = QProgressDialog("Preparando el corrector…\n\n"
+                                "Solo la primera vez: la ventana no "
+                                "responderá unos segundos.",
+                                None, 0, 0, self)
+        aviso.setWindowTitle(APP_NAME)
+        aviso.setWindowModality(Qt.WindowModal)
+        aviso.setMinimumDuration(0)
+        aviso.show()
+        QApplication.processEvents()   # que el aviso se pinte ANTES del bloqueo
+        try:
+            heal._get_session()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Corrector: no se pudo preparar — {exc}")
+        aviso.close()
+        self.statusBar().showMessage("Corrector listo: pinta y suelta para borrar")
+
     def show_models(self):
         """Ventana con todas las IAs del proyecto: cuales estan descargadas,
         cuanto ocupan, y botones para bajarlas o borrarlas."""
@@ -2684,6 +2712,8 @@ class MainWindow(QMainWindow):
         self.preview.set_brush_mode(on)
         for w in self._brush_widgets:
             w.setVisible(on)
+        if on:
+            self.warm_up_heal()   # el peaje de LaMa, antes de que pintes
         if not on:
             self.preview.clear_strokes()
         # al pintar se muestra la foto sin girar ni recortar (y al salir, con todo)
@@ -4103,12 +4133,91 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+class StartupSplash(QWidget):
+    """Pantalla de carga del arranque.
+
+    Abrir los modelos de IA bloquea el programa unos segundos (el del
+    corrector, ~11 s), asi que en vez de enseñar la ventana principal
+    congelada se enseña esto: una pantalla que dice en que va. El programa
+    aparece cuando ya esta todo listo.
+
+    Va por pasos y no lleva animacion a proposito: mientras un modelo se
+    abre no se puede repintar nada, asi que un aro girando se quedaria
+    clavado y pareceria colgado. El texto se cambia ANTES de cada paso."""
+
+    ANCHO, ALTO = 460, 210
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setFixedSize(self.ANCHO, self.ALTO)
+        pantalla = QApplication.primaryScreen().geometry()
+        self.move(pantalla.center().x() - self.ANCHO // 2,
+                  pantalla.center().y() - self.ALTO // 2)
+
+        caja = QVBoxLayout(self)
+        caja.setContentsMargins(34, 28, 34, 26)
+        caja.setSpacing(6)
+
+        titulo = QLabel(APP_NAME)
+        titulo.setStyleSheet("font-size: 30px; font-weight: 600; color: #f0f0f0;")
+        caja.addWidget(titulo)
+        lema = QLabel("Revelado RAW con IA en tu propia tarjeta gráfica")
+        lema.setStyleSheet("color: #8a8a8a;")
+        caja.addWidget(lema)
+        caja.addStretch(1)
+
+        self.paso_txt = QLabel("Iniciando…")
+        self.paso_txt.setStyleSheet("color: #d8d8d8;")
+        caja.addWidget(self.paso_txt)
+        self.barra = QProgressBar()
+        self.barra.setFixedHeight(6)
+        self.barra.setTextVisible(False)
+        caja.addWidget(self.barra)
+
+    def paso(self, texto, hecho, total):
+        self.paso_txt.setText(texto)
+        self.barra.setRange(0, total)
+        self.barra.setValue(hecho)
+        # repintar AHORA: en cuanto empiece el paso, el programa se queda
+        # sordo hasta que termine
+        QApplication.processEvents()
+
+    def paintEvent(self, _event):
+        pt = QPainter(self)
+        pt.setRenderHint(QPainter.Antialiasing)
+        pt.setPen(QPen(QColor(70, 70, 70), 1))
+        pt.setBrush(QColor(30, 30, 30))
+        pt.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1),
+                           10, 10)
+        pt.end()
+
+
+def _cargar_ia(splash):
+    """Abre los modelos antes de enseñar el programa, avisando de cada paso."""
+    tareas = [("el corrector", heal), ("las máscaras de sujeto", masks_ai),
+              ("la superresolución", upscale)]
+    tareas = [(n, m) for n, m in tareas if m.model_available()]
+    total = len(tareas) + 1
+    for i, (nombre, modulo) in enumerate(tareas):
+        splash.paso(f"Cargando {nombre}…", i, total)
+        try:
+            modulo._get_session()
+        except Exception:
+            pass   # sin esa IA se arranca igual; ya avisara al usarla
+    splash.paso("Abriendo PhotoRAW…", total - 1, total)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyleSheet(DARK_STYLE)
+    splash = StartupSplash()
+    splash.show()
+    app.processEvents()
+    _cargar_ia(splash)
     win = MainWindow()
     win.show()
+    splash.close()
     sys.exit(app.exec())
 
 

@@ -292,6 +292,19 @@ photoraw/
   Trampa de layout ya resuelta: las `QLabel` de la fila necesitan
   `setWordWrap(True)` **y** `setMinimumWidth(1)`, o el texto más largo fija
   el ancho mínimo (872 px medidos) y los botones se salen de la ventana.
+- **«El corrector congela la app al principio»** — era cierto y medido:
+  crear la sesión de LaMa tarda **~11 s y bloquea el intérprete** (el GIL),
+  así que la ventana se queda muerta aunque el trabajo corra en un hilo
+  aparte. No es CUDA ni el grafo: medido en CUDA 11,9 s, solo CPU 14,0 s,
+  con el grafo pre-optimizado 11,1 s, sin optimizar 17,7 s — es ese archivo
+  (u2net, de tamaño parecido, tarda 0,4 s). No hay forma de evitar el
+  peaje, así que se **adelanta**: `warm_up_heal()` lo paga al activar la
+  herramienta (tecla `B`), con un aviso pintado antes del bloqueo, y el
+  primer trazo ya sale en ~1 s.
+  **Corolario importante**: por eso `release_all_sessions()` NO suelta
+  LaMa salvo `include_slow=True` (al borrar el modelo del disco). Soltarlo
+  ahorra 200 MB y cuesta 11 s de congelación: pésimo negocio. Los demás se
+  recargan en ~0,5 s y sí se sueltan.
 - **Detener IA se puede pulsar siempre**: en reposo avisa de que no hay
   nada corriendo y suelta los modelos de la GPU. Antes se quedaba en gris
   y desde fuera parecía que el botón «no hacía nada».

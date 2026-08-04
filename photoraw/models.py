@@ -71,8 +71,9 @@ class Model:
                 shutil.rmtree(p, ignore_errors=True)
             elif p.exists():
                 p.unlink()
-        # y que la app no siga usando la copia que tenia en la GPU
-        ai.release_all_sessions()
+        # y que la app no siga usando la copia que tenia en la GPU (aqui si
+        # se suelta todo, incluido el corrector: el archivo ya no esta)
+        ai.release_all_sessions(include_slow=True)
 
 
 def _file_model(key, name, tool, what, size_mb, path, url, min_mb=10,

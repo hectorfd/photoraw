@@ -118,13 +118,19 @@ def _get_cpu_session():
     return _cpu_session
 
 
-def release_all_sessions():
-    """Suelta de la tarjeta grafica TODOS los modelos cargados.
+def release_all_sessions(include_slow=False):
+    """Suelta de la tarjeta grafica los modelos cargados.
 
-    PhotoRAW los deja residentes para no recargarlos en cada uso (son
-    segundos cada uno), pero en una tarjeta de 8 GB compartida con otras
-    apps eso se acumula: SCUNet + LaMa + ESRGAN + u2net + rostros suman
-    varios GB que se quedan ocupados aunque no se este calculando nada.
+    PhotoRAW los deja residentes para no recargarlos en cada uso, pero en
+    una tarjeta de 8 GB compartida con otras apps eso se acumula: SCUNet +
+    ESRGAN + u2net + rostros suman GB ocupados aunque no se calcule nada.
+
+    LaMa (el corrector) queda FUERA salvo que se pida `include_slow`, y no
+    es un capricho: crear su sesion tarda ~11 s medidos en la 4070, pase lo
+    que pase (con CUDA 11,9 s / solo CPU 14,0 s / con el grafo ya
+    optimizado 11,1 s), mientras que solo ocupa ~200 MB. Soltarlo para
+    ganar esos 200 MB regalaba un congelon de 11 s en el siguiente trazo
+    del corrector: pesimo negocio. Los demas se recargan en ~0,5 s.
 
     Es seguro llamarla mientras un trabajo esta usando un modelo: aqui solo
     se suelta la referencia del modulo, y Python no destruye la sesion
@@ -132,7 +138,10 @@ def release_all_sessions():
     global _session, _cpu_session
     _session = _cpu_session = None
     from photoraw import face_parse, faces, generative, heal, masks_ai, upscale
-    for mod in (face_parse, heal, masks_ai, upscale):
+    modulos = [face_parse, masks_ai, upscale]
+    if include_slow:
+        modulos.append(heal)
+    for mod in modulos:
         mod._session = None
     faces._sessions.clear()
     generative._sessions.clear()
