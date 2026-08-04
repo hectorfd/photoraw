@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel,
                                QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
-from photoraw import models
+from photoraw import hardware, models
 
 VERDE = "#5fbf6a"
 GRIS = "#8a8a8a"
@@ -74,6 +74,19 @@ class ModelsDialog(QDialog):
         pie_texto.setStyleSheet(f"color: {GRIS};")
         raiz.addWidget(pie_texto)
 
+        equipo = QLabel(hardware.resumen())
+        equipo.setWordWrap(True)
+        equipo.setStyleSheet(
+            f"color: {VERDE if hardware.hay_cuda() else AMBAR};")
+        raiz.addWidget(equipo)
+        if not hardware.hay_cuda():
+            nota = QLabel("Las marcadas «solo GPU» están desactivadas en este "
+                          "equipo: por CPU tardarían de minutos a horas. El "
+                          "revelado y el corrector funcionan igual.")
+            nota.setWordWrap(True)
+            nota.setStyleSheet(f"color: {GRIS};")
+            raiz.addWidget(nota)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -119,8 +132,13 @@ class ModelsDialog(QDialog):
         # todas las etiquetas parten linea y pueden encoger: si no, el texto
         # mas largo fija el ancho minimo de la fila y los botones de la
         # derecha se salen de la ventana
+        insignia = ""
+        if modelo.needs_cuda:
+            color = VERDE if hardware.hay_cuda() else AMBAR
+            insignia = f" <span style='color:{color};'>· solo GPU</span>"
         cabecera = QLabel(f"<b>{modelo.name}</b> "
-                          f"<span style='color:{GRIS};'>· {modelo.tool}</span>")
+                          f"<span style='color:{GRIS};'>· {modelo.tool}</span>"
+                          f"{insignia}")
         cabecera.setWordWrap(True)
         cabecera.setMinimumWidth(1)
         izq.addWidget(cabecera)

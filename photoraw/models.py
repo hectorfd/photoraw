@@ -35,7 +35,7 @@ class Model:
     """Una IA descargable: lo que la ventana necesita saber de ella."""
 
     def __init__(self, key, name, tool, what, size_mb, paths,
-                 installed, download, needed_by=None):
+                 installed, download, needed_by=None, needs_cuda=False):
         self.key = key
         self.name = name            # nombre del modelo
         self.tool = tool            # herramienta de PhotoRAW que lo usa
@@ -45,6 +45,10 @@ class Model:
         self._installed = installed
         self._download = download
         self.needed_by = needed_by or ()   # otras herramientas que lo usan
+        # needs_cuda: en CPU tardaria tanto (minutos u horas) que la
+        # herramienta se desactiva en el perfil limitado en vez de dejar
+        # que el usuario cuelgue el programa sin saberlo
+        self.needs_cuda = needs_cuda
 
     def installed(self):
         try:
@@ -77,12 +81,12 @@ class Model:
 
 
 def _file_model(key, name, tool, what, size_mb, path, url, min_mb=10,
-                needed_by=None):
+                needed_by=None, needs_cuda=False):
     return Model(
         key, name, tool, what, size_mb, [path],
         installed=lambda: path.exists() and path.stat().st_size > min_mb * 1_000_000,
         download=lambda cb=None: _download_file(path, url, cb),
-        needed_by=needed_by)
+        needed_by=needed_by, needs_cuda=needs_cuda)
 
 
 AI_MODELS = [
@@ -90,19 +94,19 @@ AI_MODELS = [
         "scunet", "SCUNet", "Reducción de ruido (IA)",
         "Limpia el ruido de ISO alto conservando el detalle fino. Lo que "
         "hace el deslizador «Ruido IA».",
-        88, ai.DENOISE_MODEL, ai.DENOISE_URL),
+        88, ai.DENOISE_MODEL, ai.DENOISE_URL, needs_cuda=True),
 
     _file_model(
         "codeformer", "CodeFormer", "Retoque de rostros",
         "Reconstruye caras con mano firme: rescata ojos y piel en fotos "
         "movidas o pequeñas. El más agresivo de los dos.",
-        360, *faces.FACE_MODELS["CodeFormer"]),
+        360, *faces.FACE_MODELS["CodeFormer"], needs_cuda=True),
 
     _file_model(
         "gfpgan", "GFPGAN 1.4", "Retoque de rostros",
         "Alternativa más suave: respeta más los rasgos originales. Elige "
         "uno u otro en el desplegable de la herramienta.",
-        325, *faces.FACE_MODELS["GFPGAN"]),
+        325, *faces.FACE_MODELS["GFPGAN"], needs_cuda=True),
 
     _file_model(
         "yunet", "YuNet", "Detector de caras",
@@ -134,7 +138,7 @@ AI_MODELS = [
         "esrgan", "Real-ESRGAN x4", "Superresolución",
         "Exporta a 2× o 4× reconstruyendo detalle real. También afina el "
         "parche del borrado generativo.",
-        67, upscale.SR_MODEL, upscale.SR_URL),
+        67, upscale.SR_MODEL, upscale.SR_URL, needs_cuda=True),
 
     Model(
         "sd_inpaint", "Realistic Vision 5.1", "Borrar con IA (generativo)",
@@ -143,7 +147,8 @@ AI_MODELS = [
         "el único que reconstruye escena de verdad.",
         2000, [generative.SD_DIR],
         installed=generative.model_available,
-        download=lambda cb=None: generative.download_model(cb)),
+        download=lambda cb=None: generative.download_model(cb),
+        needs_cuda=True),
 ]
 
 

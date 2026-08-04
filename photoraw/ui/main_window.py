@@ -23,7 +23,7 @@ from PySide6.QtGui import QPen
 import qtawesome as qta
 
 from photoraw import (ai, diskcache, engine, face_parse, faces, generative,
-                      heal, loader, masks_ai, presets, upscale)
+                      hardware, heal, loader, masks_ai, presets, upscale)
 from photoraw.edits import EditStore
 from photoraw.ui.curve_widget import CurveWidget, HistogramWidget
 
@@ -1499,6 +1499,30 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_toolbar()
         self.refresh_presets()
+        self._aplicar_perfil()
+
+    # ---------- perfil segun la tarjeta grafica ----------
+
+    def _aplicar_perfil(self):
+        """Enciende o apaga las herramientas IA segun el equipo.
+
+        En un PC sin CUDA, las IAs pesadas tardarian de minutos a horas por
+        CPU. Dejarlas pulsables seria una trampa: parecen disponibles y te
+        cuelgan el programa. Se apagan y se explica por que en el globo de
+        ayuda. El revelado entero (exposicion, curvas, HSL, recorte,
+        corrector, mascaras de degradado...) va por CPU y funciona igual."""
+        info = hardware.detectar()
+        if info["perfil"] == hardware.COMPLETO:
+            self.statusBar().showMessage(hardware.resumen())
+            return
+        porque = ("\n\nDESACTIVADO: necesita una tarjeta NVIDIA con CUDA.\n"
+                  f"En este equipo: {info['motivo']}.\n"
+                  "Por CPU tardaría de minutos a horas por foto.")
+        for widget in (self.ai_btn, self.face_btn, self.face_model_combo,
+                       *self._solo_gpu):
+            widget.setEnabled(False)
+            widget.setToolTip(widget.toolTip() + porque)
+        self.statusBar().showMessage(hardware.resumen())
 
     # ---------- interfaz ----------
 
@@ -1531,6 +1555,7 @@ class MainWindow(QMainWindow):
 
         self.sliders = {}
         self.value_labels = {}
+        self._solo_gpu = []   # controles que se apagan sin CUDA
         self._auto_exp_btn = None
         self._auto_exp_active = False
 
@@ -1974,6 +1999,8 @@ class MainWindow(QMainWindow):
             "Ideal para quitar personas u objetos grandes.")
         b_erase.clicked.connect(self.run_generative_erase)
         v.addWidget(b_erase)
+        # el generativo es lo unico impensable sin GPU: en CPU son horas
+        self._solo_gpu.append(b_erase)
 
         b_del = QPushButton(icon("mdi6.delete-outline"), "Eliminar máscara")
         b_del.clicked.connect(self.delete_mask)
@@ -4205,17 +4232,27 @@ class StartupSplash(QWidget):
 
 
 def _cargar_ia(splash):
-    """Abre los modelos antes de enseñar el programa, avisando de cada paso."""
+    """Mira el equipo y abre los modelos antes de enseñar el programa."""
+    splash.paso("Buscando tarjeta gráfica…", 0, 5)
+    info = hardware.detectar()
+    splash.paso(hardware.resumen(), 1, 5)
+
     tareas = [("el corrector", heal), ("las máscaras de sujeto", masks_ai),
               ("la superresolución", upscale)]
     tareas = [(n, m) for n, m in tareas if m.model_available()]
-    total = len(tareas) + 1
+    total = len(tareas) + 2
+    primera = None
     for i, (nombre, modulo) in enumerate(tareas):
-        splash.paso(f"Cargando {nombre}…", i, total)
+        splash.paso(f"Cargando {nombre}…", i + 1, total)
         try:
-            modulo._get_session()
+            sesion = modulo._get_session()
+            primera = primera or sesion
         except Exception:
             pass   # sin esa IA se arranca igual; ya avisara al usarla
+    if primera is not None:
+        # la prueba de fuego: ver que proveedor uso de verdad un modelo ya
+        # cargado (CUDA puede estar listado y luego caer a CPU sin avisar)
+        info = hardware.confirmar_con_sesion(primera)
     splash.paso("Abriendo PhotoRAW…", total - 1, total)
 
 
