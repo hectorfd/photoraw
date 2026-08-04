@@ -1,0 +1,201 @@
+# PhotoRAW
+
+Editor de fotos RAW hecho a medida, con herramientas IA que corren en tu
+propia GPU (NVIDIA RTX 4070 + CUDA). Todo local: ninguna foto sale de tu PC.
+
+## Cómo abrirlo
+
+Doble clic en **PhotoRAW.bat** (en esta carpeta).
+
+## Lo que ya tiene
+
+### Revelado (pestaña Revelar)
+- **Perfil**: interpretación base del RAW — Estándar, Vívido, Retrato,
+  Paisaje, Plano (para editar) y Blanco y negro.
+- **Ajustes básicos**: exposición, contraste, luces, sombras, blancos,
+  negros, temperatura, matiz, textura, borrar neblina, saturación, vitalidad.
+- **Curva de tonos**: paramétrica, de puntos y por canal (RGB / R / G / B).
+- **Mezclador de color HSL**: 8 bandas (rojo → magenta), cada una con matiz,
+  saturación y luminancia.
+- **Color de punto**: cuentagotas 💧 — toma una muestra en la foto y cambia
+  solo ese color (matiz hasta ±180°, saturación, luminancia y rango).
+- **Calibración**: matiz de sombras y tono/saturación de cada primario RGB
+  (la matriz conserva los neutros: los grises jamás se tiñen).
+- **Detalle**: enfoque (cantidad/radio/detalle/máscara — Alt para ver la
+  máscara), reducción de ruido manual (luminancia/color).
+- **Efectos**: grano de película (cantidad, tamaño, aspereza).
+- Todos los deslizadores de color llevan **pistas degradadas** que indican
+  hacia dónde va el ajuste (estilo Lightroom).
+
+### Recorte (pestaña Recorte)
+Marco arrastrable con rejilla de tercios, proporciones (1:1, 4:3, 3:2, 16:9,
+verticales…), enderezar ±45°, girar 90° y voltear. No destructivo.
+
+### Máscaras (pestaña Máscaras) — ajustes locales
+- **Degradado lineal** y **radial**: se dibujan arrastrando sobre la foto y
+  después se **editan con tiradores** (mover el centro/extremos, estirar
+  ancho y alto); la radial además tiene control de **desvanecido**.
+- **Pincel**: pinta a mano la zona, con modo **añadir/quitar** (borrador).
+- **Sujeto (IA)** y **Fondo (IA)**: segmentación automática con u2net.
+- **Retrato (IA)**: la IA divide las caras en zonas y cada una se vuelve
+  una máscara — **Piel, Cabello, Cejas, Ojos, Labios o Dientes** (menú del
+  botón). Ejemplos: aclarar solo los dientes, suavizar solo la piel, dar
+  color solo a los labios. Si hay varias caras, la máscara las une todas.
+- Cada máscara tiene sus propios ajustes (exposición, contraste, luces,
+  sombras, temperatura, matiz, saturación) y se puede **invertir**. El velo
+  rojo que marca la zona se puede **ocultar** con una casilla y se aparta
+  solo mientras arrastras un ajuste.
+- **Ruido IA y Rostros IA por máscara**: aplica la reducción de ruido o el
+  retoque de rostros solo en la zona de la máscara (p. ej. limpiar solo el
+  fondo). La primera vez en cada foto la IA tarda unos segundos; después
+  el deslizador responde al instante. También sale así en el JPEG exportado.
+- **Refinar a mano**: botones **Añadir / Restar** — pinta con el pincel
+  sobre cualquier máscara (incluidas las de IA) para sumarle zonas que le
+  faltaron o quitarle lo que sobró.
+- **Borrar con IA (rellenar fondo)**: hace desaparecer lo que cubre la
+  máscara seleccionada y **reconstruye el fondo con IA generativa**
+  (difusión local en tu GPU, ~15-20 s). Para quitar personas y objetos
+  grandes de verdad. Ctrl+Z lo deshace; al exportar se re-aplica con la
+  misma semilla. Modelo ~2 GB, ya descargado. La resolución de trabajo
+  se adapta a la zona y a la VRAM libre (512/640/768 px): con otras apps
+  acaparando la GPU baja de resolución en vez de arrastrarse. Consejo:
+  máscara ajustada al objeto, y si el fondo mezcla texturas (pasto+agua),
+  mejor borrar por partes.
+
+### Herramientas IA (modelos ONNX en tu GPU)
+| Herramienta | Modelo | Qué hace |
+|---|---|---|
+| Reducción de ruido | SCUNet | Limpia el ruido conservando el detalle |
+| Retoque de rostros | CodeFormer / GFPGAN | Restaura caras (piel, ojos) |
+| Corrector | LaMa | Todos los trazos con IA (~0,2 s; el relleno clásico queda de respaldo si falta el modelo) |
+| Máscaras Sujeto/Fondo | u2net | Segmenta a las personas / objeto principal |
+| Máscaras de retrato | BiSeNet | Divide las caras en piel, pelo, ojos, labios… |
+| Superresolución | Real-ESRGAN x4 | Exporta a 2× o 4× reconstruyendo detalle |
+| Borrado generativo | Realistic Vision (difusión) | Reconstruye el fondo tras quitar personas/objetos |
+
+Los modelos se descargan una sola vez al usarlos y quedan en
+`~/.photoraw/models`.
+
+### Flujo de trabajo
+- **Original** (tecla `O`): antes/después instantáneo.
+- **Píldora de progreso** flotante sobre la foto: aro girando + estado de lo
+  que trabaja en segundo plano, con porcentaje en ruido IA, corrector y
+  borrado generativo.
+- **Restaurar foto**: borra toda la edición (con confirmación).
+- **Corrector** (tecla `B`): pinta y suelta para borrar; Ctrl+Z deshace.
+- **Copiar/Pegar ajustes** (Ctrl+Shift+C/V) a varias fotos, **preajustes**
+  con nombre, **insignia de lápiz** en las miniaturas editadas y miniatura
+  viva que refleja tu edición.
+- **Exportar JPEG** (Ctrl+E) a tamaño original, 2× o 4× con IA.
+
+### Rendimiento
+- **Render en dos fases**: borrador reducido mientras arrastras un ajuste
+  (~0,2 s) y calidad completa al soltar. El zoom no salta en el cambio.
+- **Renders en fila india**: nunca corre más de un render a la vez; si
+  mueves un ajuste mientras uno trabaja, solo se atiende el pedido más
+  reciente. Así el procesador no se satura al arrastrar.
+- **Caché en disco** (`~/.photoraw/cache`, máx. 4 GB, se limpia solo): las
+  fotos ya visitadas cargan en ~30 ms y las miniaturas al instante.
+- **La IA también se guarda en disco**: ruido IA, rostros IA, corrector,
+  borrado generativo y máscaras IA se calculan una sola vez por foto —
+  reabrir una foto editada pasa de ~16 s a ~0,2 s.
+- **Carril rápido**: decodificar y renderizar tienen sus propios hilos; la
+  foto en pantalla nunca hace cola detrás de un trabajo IA largo.
+- Curvas y HSL por tablas de consulta; mapas suaves a resolución reducida.
+
+### No destructivo
+Los ajustes viven en `.photoraw_edits.json` dentro de cada carpeta de fotos.
+Tus RAW originales **nunca** se modifican.
+
+## Formatos compatibles
+
+RAW: CR2, CR3, NEF, ARW, DNG, RAF, RW2, ORF, PEF y más.
+También JPEG, PNG, TIFF, WebP y **HEIC/HEIF** (las fotos de iPhone y de
+móviles Android recientes), vía `pillow-heif`.
+
+A las fotos que traen perfil de color incrustado (los HEIC y JPG de iPhone
+vienen en Display P3) se les convierte el color a sRGB al cargarlas, igual
+que hace Windows; sin eso los rojos y verdes salen sobresaturados.
+
+## Pendiente / ideas futuras
+
+- [ ] **Pincel inteligente** (SAM/MobileSAM): tocar un objeto y que la
+      máscara se ajuste sola a sus bordes.
+- [ ] Máscara de **Cielo** con IA (falta elegir un buen modelo ONNX de
+      segmentación de cielo; Sujeto/Fondo ya están).
+- [ ] Máscara por **rango de color/luminancia** (matemática, como el color
+      de punto pero para máscaras) y rotación de los degradados.
+- [x] ~~**Edición generativa** (borrar objetos grandes rellenando con
+      difusión, tipo Magic Editor)~~ — hecho: botón «Borrar con IA».
+- [ ] Textura/claridad como ajustes locales por máscara (ruido IA y rostros
+      IA ya están).
+- [ ] Historial de deshacer general (Ctrl+Z hoy solo deshace el corrector).
+- [ ] Exportar con perfil de color incrustado y elección de calidad JPEG.
+- [ ] Vista de comparación lado a lado (antes | después en pantalla dividida).
+
+## Arquitectura (para el que programe)
+
+```
+photoraw/
+  loader.py      decodificación RAW (rawpy) e imágenes
+  diskcache.py   caché en disco de vistas previas y miniaturas (LRU)
+  engine.py      pipeline de revelado (numpy/OpenCV): geometría → perfil →
+                 calibración → tonal → curvas → HSL/color punto → máscaras
+                 → detalle → grano
+  edits.py       persistencia no destructiva (JSON por carpeta)
+  presets.py     preajustes con nombre
+  ai.py          SCUNet (ruido) + infraestructura ONNX/CUDA compartida
+  faces.py       CodeFormer/GFPGAN (rostros) + YuNet (detección)
+  heal.py        corrector: LaMa (IA; Telea de respaldo sin modelo)
+  masks_ai.py    u2net (segmentación de sujeto)
+  face_parse.py  BiSeNet (máscaras de retrato: piel, pelo, ojos...)
+  generative.py  borrado generativo (difusión) + afinado Real-ESRGAN
+  upscale.py     Real-ESRGAN (superresolución)
+  ui/            PySide6: ventana principal, visor con zoom/recorte/máscaras,
+                 editor de curvas
+```
+
+
+
+# Aqui te Quedaste CLAUDE
+
+**Hecho (2026-07-07):**
+- Nitidez del «Borrar con IA»: el parche se re-amplía con Real-ESRGAN en
+  borrados grandes — falta que Héctor lo valide con la foto del pasto seco.
+- Fotos editadas lentas al reabrir: los resultados IA (ruido, rostros,
+  corrector, borrado, máscaras) ahora se cachean en disco (16 s → 0,2 s) y
+  decodificar/renderizar tienen carril propio de hilos. La primera apertura
+  de una foto sigue calculando la IA una vez; las siguientes son instantáneas.
+- Miniaturas de DNG de iPhone salían volteadas: la miniatura incrustada ahora
+  se endereza con la orientación del RAW (convención dcraw de LibRaw).
+- El corrector dejaba un borrón liso en trazos pequeños (la nariz de Héctor,
+  jaja): eran Telea; ahora TODOS los trazos usan LaMa (~0,2 s con la sesión
+  caliente; clave de caché subida a "heal2" para invalidar los borrones
+  guardados). Verificado con los trazos reales de IMG_3270.
+- Píldora de progreso (BusyChip) flotante sobre el visor: aro girando +
+  estado, con porcentaje en ruido IA, corrector y borrado generativo.
+- El borrado generativo se quedaba «al 100%» ~3 min: el porcentaje solo
+  contaba la difusión, y el afinado ESRGAN posterior se arrastraba porque
+  los modelos de difusión residentes acaparaban la VRAM. Arreglado en tres
+  frentes: cuDNN a HEURISTIC (sin calibración exhaustiva al primer uso),
+  borrado en dos fases que libera la difusión de la VRAM antes de afinar
+  (210 s → 12,6 s medidos), y el porcentaje ahora cubre todo el trabajo
+  (difusión 85% + afinado 15%, tope visual en 99% hasta acabar).
+
+**Hecho (2026-07-08, madrugada):**
+- **DATO CLAVE descubierto**: la RTX 4070 de Héctor es la de **8 GB** (no
+  12), y apps de fondo (iCloud Photos, Camo, Kaspersky, Screenpresso) le
+  comen VRAM. Cuando la VRAM se desborda, Windows tira de RAM y todo va
+  10-100× más lento sin avisar — esa era la raíz de casi toda la lentitud.
+- Relleno «tipo pelaje» en el pasto: la difusión trabajaba fija a 512 px.
+  Ahora la resolución es adaptativa según la VRAM libre del momento
+  (`_pick_size`): 640 px medido en su GPU = 19,8 s limpio; 768 desborda
+  (513 s), queda para tarjetas más grandes. Escalera de reintentos
+  768→640→512 si falta memoria. Clave de caché → "erase2".
+- El techo de calidad restante es el modelo (Realistic Vision 5.1, clase
+  SD 1.5): es lo razonable para 8 GB. SDXL/FLUX no entran cómodos.
+
+**Falta que Héctor pruebe** (reiniciar PhotoRAW primero): repasar el
+corrector en la nariz (borrar los trazos feos y volver a pintar), abrir una
+foto editada dos veces (la 2.ª debe ser inmediata), miniaturas derechas, y
+rehacer el «Borrar con IA» del pasto (se recalculará solo a 640 px).

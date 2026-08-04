@@ -1,0 +1,74 @@
+# ---- Entorno de Python ----------------------------------------------
+# El entorno virtual se reconstruye con pip, no se guarda (pesa cientos de MB)
+.venv/
+venv/
+env/
+
+# Ficheros compilados de Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+# Empaquetado / instalación
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Herramientas de desarrollo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ---- Datos de PhotoRAW ----------------------------------------------
+# Los modelos de IA (SCUNet, LaMa, u2net, BiSeNet, SD inpainting...) y la
+# caché viven en ~/.photoraw, fuera del proyecto. Por si alguna vez
+# acaban aquí dentro:
+models/
+cache/
+.photoraw/
+
+# ---- Fotos y salidas de prueba --------------------------------------
+# Fotos originales y exportaciones: son tuyas, no código. Además un DNG
+# pesa decenas de MB y en Git se quedaría ahí para siempre.
+fotoprueba/
+test_export.jpg
+*.dng
+*.DNG
+*.raw
+*.RAW
+*.cr2
+*.CR2
+*.nef
+*.NEF
+*.arw
+*.ARW
+*.orf
+*.ORF
+*.rw2
+*.RW2
+*.tif
+*.tiff
+*.psd
+
+# JPEG/PNG sueltos de prueba en la raíz (no toca los de la interfaz,
+# que están dentro de photoraw/)
+/*.jpg
+/*.jpeg
+/*.png
+
+# ---- Ajustes locales de la máquina ----------------------------------
+.claude/settings.local.json
+*.log
+
+# Editores
+.vscode/
+.idea/
+*.swp
+
+# Windows / macOS
+Thumbs.db
+desktop.ini
+.DS_Store
