@@ -2716,9 +2716,21 @@ class MainWindow(QMainWindow):
             self.warm_up_heal()   # el peaje de LaMa, antes de que pintes
         if not on:
             self.preview.clear_strokes()
-        # al pintar se muestra la foto sin girar ni recortar (y al salir, con todo)
-        self.fit_next = True
+        # El corrector pinta sobre la foto SIN girar ni recortar. Solo hace
+        # falta reencuadrar si esa geometria cambia la imagen; si la foto no
+        # esta recortada ni girada es la misma de siempre y se conserva el
+        # zoom donde lo tuvieras. Antes saltaba a pantalla completa siempre,
+        # justo cuando te habias acercado a la mota que ibas a borrar.
+        self.fit_next = self._geometry_changes_image()
         self.request_render()
+
+    def _geometry_changes_image(self):
+        """¿El recorte/giro hacen que la foto revelada no coincida con la
+        original? (las claves son las de engine._apply_geometry)"""
+        e = self.current_edits
+        return bool(e.get("crop") or int(e.get("rot90", 0) or 0)
+                    or e.get("flip_h") or e.get("flip_v")
+                    or float(e.get("straighten") or 0.0))
 
     def on_strokes_changed(self):
         """Al soltar el raton: trazo de mascara o borrado del corrector."""
