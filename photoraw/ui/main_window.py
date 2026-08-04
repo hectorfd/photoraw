@@ -30,9 +30,10 @@ from photoraw.ui.curve_widget import CurveWidget, HistogramWidget
 APP_NAME = "PhotoRAW"
 
 
-def icon(name):
+def icon(name, color="#d8d8d8"):
     """Icono Material Design en el tono claro del tema."""
-    return qta.icon(name, color="#d8d8d8", color_active="#ffffff")
+    return qta.icon(name, color=color, color_active="#ffffff",
+                    color_disabled="#5a5a5a")
 
 # (clave, etiqueta, min, max, escala) agrupados en secciones con divisor
 SLIDER_SECTIONS = [
@@ -278,13 +279,24 @@ class Signals(QObject):
 
 class BusyChip(QWidget):
     """Pildora flotante sobre el visor con un aro girando y el estado del
-    trabajo en curso (con porcentaje cuando se conoce), estilo Lightroom."""
+    trabajo en curso (con porcentaje cuando se conoce), estilo Lightroom.
+
+    A la derecha lleva una ✕ para detener el trabajo: es el unico sitio de
+    la pildora que responde al raton, el resto de los clics siguen su camino
+    hacia la foto."""
+
+    cancelled = Signal()
+
+    X_SIZE = 22   # lado del cuadro sensible de la ✕
+    X_PAD = 8     # separacion con el borde derecho
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setMouseTracking(True)   # para iluminar la ✕ al pasar por encima
+        self.setToolTip("Detener el trabajo de IA (Esc)")
         self._angle = 0
         self._text = ""
+        self._hover_x = False
         self._timer = QTimer(self)
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._tick)
@@ -297,8 +309,8 @@ class BusyChip(QWidget):
 
     def show_text(self, text):
         self._text = text
-        w = self.fontMetrics().horizontalAdvance(text) + 56
-        self.setFixedSize(max(w, 130), 34)
+        w = self.fontMetrics().horizontalAdvance(text) + 56 + self.X_SIZE + self.X_PAD
+        self.setFixedSize(max(w, 160), 34)
         self._reposition()
         if not self.isVisible():
             self.show()
@@ -308,12 +320,42 @@ class BusyChip(QWidget):
 
     def hide_chip(self):
         self._timer.stop()
+        self._hover_x = False
+        self.unsetCursor()
         self.hide()
 
     def _reposition(self):
         p = self.parentWidget()
         if p is not None:
             self.move((p.width() - self.width()) // 2, 14)
+
+    def _x_rect(self):
+        return QRectF(self.width() - self.X_SIZE - self.X_PAD,
+                      (34 - self.X_SIZE) / 2, self.X_SIZE, self.X_SIZE)
+
+    def mouseMoveEvent(self, event):
+        over = self._x_rect().contains(event.position())
+        if over != self._hover_x:
+            self._hover_x = over
+            if over:
+                self.setCursor(Qt.PointingHandCursor)
+            else:
+                self.unsetCursor()
+            self.update()
+        event.ignore()
+
+    def leaveEvent(self, _event):
+        if self._hover_x:
+            self._hover_x = False
+            self.unsetCursor()
+            self.update()
+
+    def mousePressEvent(self, event):
+        if self._x_rect().contains(event.position()):
+            self.cancelled.emit()
+            event.accept()
+        else:
+            event.ignore()   # clic en la pildora: que lo reciba la foto
 
     def paintEvent(self, _event):
         pt = QPainter(self)
@@ -326,8 +368,19 @@ class BusyChip(QWidget):
         pt.setPen(pen)
         pt.drawArc(QRectF(12, 8, 18, 18), -self._angle * 16, 110 * 16)
         pt.setPen(QColor(235, 235, 235))
-        pt.drawText(self.rect().adjusted(40, 0, -14, 0),
+        pt.drawText(self.rect().adjusted(40, 0, -(self.X_SIZE + self.X_PAD), 0),
                     Qt.AlignVCenter | Qt.AlignLeft, self._text)
+        # boton de parada: circulo tenue (mas marcado al pasar por encima)
+        xr = self._x_rect()
+        pt.setPen(Qt.NoPen)
+        pt.setBrush(QColor(255, 255, 255, 46 if self._hover_x else 24))
+        pt.drawEllipse(xr)
+        pen = QPen(QColor(255, 255, 255, 255 if self._hover_x else 190), 2)
+        pen.setCapStyle(Qt.RoundCap)
+        pt.setPen(pen)
+        c = xr.adjusted(6.5, 6.5, -6.5, -6.5)
+        pt.drawLine(c.topLeft(), c.bottomRight())
+        pt.drawLine(c.topRight(), c.bottomLeft())
         pt.end()
 
 
@@ -404,100 +457,133 @@ class RenderJob(QRunnable):
             self.signals.render_done.emit()
 
 
-class MaskAIJob(QRunnable):
-    """Segmenta el sujeto de la foto para las mascaras IA."""
+class AIJob(QRunnable):
+    """Trabajo de IA que se puede detener desde la interfaz.
+
+    Al crearse comparte con la ventana un "testigo" de parada. Cuando el
+    usuario pulsa Detener, la ventana lo marca y estrena uno nuevo: los
+    trabajos en curso se enteran y abortan en su proximo punto de control
+    (cada paso de difusion, cada mosaico, cada zona), y los que se lancen
+    despues nacen con el testigo limpio.
+
+    OJO: el corte solo puede ocurrir ENTRE pasos. Una llamada al modelo ya
+    en marcha en la GPU no se puede interrumpir desde Python, asi que el
+    trabajo puede tardar unos segundos mas en soltarla; la interfaz no
+    espera a eso (ver MainWindow.cancel_ai)."""
 
     def __init__(self, path, base, window):
         super().__init__()
         self.path = path
         self.base = base
         self.window = window
+        self.token = window.ai_cancel
+
+    @property
+    def cancelled(self):
+        return self.token["stop"]
+
+    def status(self, msg):
+        self.window.signals.ai_status.emit(msg)
+
+    def progress(self, label, scale=None):
+        """Devuelve el progress_cb que pasar al modulo de IA: informa del
+        porcentaje y, de paso, aborta el trabajo si se pidio parar."""
+        def cb(p):
+            if self.token["stop"]:
+                raise ai.Cancelled()
+            if scale is not None:
+                p = scale(p)
+            self.status(f"{label}… {min(int(p * 100), 99)} %")
+        return cb
+
+
+class MaskAIJob(AIJob):
+    """Segmenta el sujeto de la foto para las mascaras IA."""
 
     def run(self):
+        if self.cancelled:
+            self.window.on_mask_ai_done(str(self.path), None)
+            return
         key = "subj-" + diskcache.result_key(self.base)
         hit = diskcache.load_result(self.path, key)
         if hit is not None:
             self.window.on_mask_ai_done(str(self.path), hit[0])
             return
         try:
-            self.window.signals.ai_status.emit("Máscara IA: analizando la foto…")
+            self.status("Máscara IA: analizando la foto…")
             result = masks_ai.subject_mask(self.base)
             diskcache.save_result(self.path, key, result)
+        except ai.Cancelled:
+            result = None
+            self.status("Máscara IA: detenida")
         except Exception as exc:
             result = None
-            self.window.signals.ai_status.emit(f"Máscara IA: error — {exc}")
+            self.status(f"Máscara IA: error — {exc}")
         self.window.on_mask_ai_done(str(self.path), result)
 
 
-class FaceParseJob(QRunnable):
+class FaceParseJob(AIJob):
     """Divide las caras de la foto en zonas (piel, pelo, labios...) para
     las mascaras de retrato."""
 
-    def __init__(self, path, base, window):
-        super().__init__()
-        self.path = path
-        self.base = base
-        self.window = window
-
     def run(self):
+        if self.cancelled:
+            self.window.on_face_parse_done(str(self.path), None)
+            return
         key = "fpl-" + diskcache.result_key(self.base)
         hit = diskcache.load_result(self.path, key)
         if hit is not None:
             self.window.on_face_parse_done(str(self.path), hit[0])
             return
         try:
-            self.window.signals.ai_status.emit(
-                "Máscara de retrato: analizando las caras…")
+            self.status("Máscara de retrato: analizando las caras…")
             result = face_parse.parse_labels(self.base)
             diskcache.save_result(self.path, key, result)
+        except ai.Cancelled:
+            result = None
+            self.status("Máscara de retrato: detenida")
         except Exception as exc:
             result = None
-            self.window.signals.ai_status.emit(
-                f"Máscara de retrato: error — {exc}")
+            self.status(f"Máscara de retrato: error — {exc}")
         self.window.on_face_parse_done(str(self.path), result)
 
 
-class AIDenoiseJob(QRunnable):
+class AIDenoiseJob(AIJob):
     """Pasa la vista previa por el modelo de IA en la GPU."""
 
-    def __init__(self, path, base, window):
-        super().__init__()
-        self.path = path
-        self.base = base
-        self.window = window
-
     def run(self):
+        if self.cancelled:
+            self.window.on_ai_denoised(str(self.path), None)
+            return
         key = "den-" + diskcache.result_key(self.base)
         hit = diskcache.load_result(self.path, key)
         if hit is not None:
             self.window.on_ai_denoised(str(self.path), hit[0])
             return
         try:
-            self.window.signals.ai_status.emit("IA: procesando…")
-
-            def cb(p):
-                self.window.signals.ai_status.emit(
-                    f"Ruido IA… {min(int(p * 100), 99)} %")
-
-            result = ai.denoise(self.base, progress_cb=cb)
+            self.status("IA: procesando…")
+            result = ai.denoise(self.base, progress_cb=self.progress("Ruido IA"))
             diskcache.save_result(self.path, key, result)
+        except ai.Cancelled:
+            result = None
+            self.status("Ruido IA: detenido")
         except Exception as exc:
             result = None
-            self.window.signals.ai_status.emit(f"IA: error — {exc}")
+            self.status(f"IA: error — {exc}")
         self.window.on_ai_denoised(str(self.path), result)
 
 
-class HealJob(QRunnable):
+class HealJob(AIJob):
     """Rellena con LaMa las zonas pintadas con el pincel corrector."""
 
     def __init__(self, path, base, strokes, window):
-        super().__init__()
-        self.path = path
-        self.base = base
+        super().__init__(path, base, window)
         self.strokes = strokes
-        self.window = window
 
     def run(self):
+        if self.cancelled:
+            self.window.on_healed(str(self.path), None, self.strokes)
+            return
         # "heal2": desde que el corrector usa LaMa tambien en manchas
         # pequenas, los resultados del relleno clasico guardados no valen
         key = "heal2-" + diskcache.result_key(self.base, self.strokes)
@@ -506,38 +592,45 @@ class HealJob(QRunnable):
             self.window.on_healed(str(self.path), hit[0], self.strokes)
             return
         try:
-            self.window.signals.ai_status.emit("Corrector: borrando…")
+            self.status("Corrector: borrando…")
             h, w = self.base.shape[:2]
             mask = heal.rasterize_strokes(self.strokes, h, w)
-
-            def cb(p):
-                self.window.signals.ai_status.emit(
-                    f"Corrector… {min(int(p * 100), 99)} %")
-
-            result = heal.inpaint(self.base, mask, progress_cb=cb)
+            result = heal.inpaint(self.base, mask,
+                                  progress_cb=self.progress("Corrector"))
             # redondeado a 8 bits (= como se guarda): asi la huella de los
             # pasos que parten de la foto corregida no cambia entre sesiones
             result = (np.clip(result, 0.0, 1.0) * 255.0 + 0.5).astype(
                 np.uint8).astype(np.float32) / 255.0
             diskcache.save_result(self.path, key, result)
+        except ai.Cancelled:
+            result = None
+            self.status("Corrector: detenido")
+            # los trazos no llegaron a aplicarse: que no queden guardados
+            self.window.heal_undo_request = (str(self.path), self.strokes)
         except Exception as exc:
             result = None
-            self.window.signals.ai_status.emit(f"Corrector: error — {exc}")
+            self.status(f"Corrector: error — {exc}")
         self.window.on_healed(str(self.path), result, self.strokes)
 
 
-class EraseJob(QRunnable):
+class EraseJob(AIJob):
     """Borrado generativo: reconstruye el fondo con difusion en las zonas
-    marcadas. `ops` es la lista de operaciones a aplicar en orden."""
+    marcadas. `ops` es la lista de operaciones a aplicar en orden.
 
-    def __init__(self, path, base, ops, window):
-        super().__init__()
-        self.path = path
-        self.base = base
+    `drop_on_cancel` distingue los dos casos: un borrado recien pedido que
+    se detiene debe desaparecer del historial (no llego a hacerse), mientras
+    que al re-aplicar borrados ya guardados solo se suspende el calculo, la
+    edicion sigue ahi."""
+
+    def __init__(self, path, base, ops, window, drop_on_cancel=False):
+        super().__init__(path, base, window)
         self.ops = ops
-        self.window = window
+        self.drop_on_cancel = drop_on_cancel
 
     def run(self):
+        if self.cancelled:
+            self._give_up()
+            return
         # "erase2": desde que las zonas grandes se difunden a 768 px, los
         # rellenos a 512 guardados quedan invalidados a proposito
         key = "erase2-" + diskcache.result_key(
@@ -555,15 +648,10 @@ class EraseJob(QRunnable):
                 union = wmap if union is None else np.maximum(union, wmap)
                 if hit is not None:
                     continue  # resultado ya en cache; solo falta la union
-
-                def cb(p, j=j, n=n):
-                    self.window.signals.ai_status.emit(
-                        f"Borrado generativo… "
-                        f"{min(int((j + p) / n * 100), 99)} %")
-
-                result = generative.erase(result, wmap,
-                                          seed=int(op.get("seed", 0)),
-                                          progress_cb=cb)
+                result = generative.erase(
+                    result, wmap, seed=int(op.get("seed", 0)),
+                    progress_cb=self.progress("Borrado generativo",
+                                              lambda p, j=j, n=n: (j + p) / n))
             if hit is not None:
                 result = hit[0]
             elif result is not self.base:
@@ -572,39 +660,52 @@ class EraseJob(QRunnable):
                 result = (np.clip(result, 0.0, 1.0) * 255.0 + 0.5).astype(
                     np.uint8).astype(np.float32) / 255.0
                 diskcache.save_result(self.path, key, result)
+        except ai.Cancelled:
+            self._give_up()
+            return
         except Exception as exc:
             result = None
             self.window.signals.ai_status.emit(
                 f"Borrado generativo: error — {exc}")
         self.window.on_erased(str(self.path), result, union)
 
+    def _give_up(self):
+        """Abandona el borrado: suelta los ~2 GB de VRAM del modelo de
+        difusion y, si el borrado era nuevo, pide a la ventana que lo quite
+        del historial (lo hara en el hilo de la interfaz)."""
+        generative.release_sessions()
+        self.status("Borrado generativo: detenido")
+        if self.drop_on_cancel:
+            self.window.erase_undo_request = (str(self.path), self.ops)
+        self.window.on_erased(str(self.path), None, None)
 
-class AIFaceJob(QRunnable):
+
+class AIFaceJob(AIJob):
     """Detecta y restaura los rostros de la vista previa en la GPU."""
 
-    def __init__(self, path, base, window):
-        super().__init__()
-        self.path = path
-        self.base = base
-        self.window = window
-
     def run(self):
+        if self.cancelled:
+            self.window.on_ai_faces_done(str(self.path), None, 0)
+            return
         key = f"fac-{faces.current_model()}-" + diskcache.result_key(self.base)
         hit = diskcache.load_result(self.path, key)
         if hit is not None:
             self.window.on_ai_faces_done(str(self.path), hit[0], hit[1])
             return
         try:
-            self.window.signals.ai_status.emit("IA rostros: procesando…")
+            self.status("IA rostros: procesando…")
             result, n = faces.enhance_faces(self.base)
             if n == 0:
                 result = None
-                self.window.signals.ai_status.emit("IA rostros: no se detectaron caras")
+                self.status("IA rostros: no se detectaron caras")
             else:
                 diskcache.save_result(self.path, key, result, meta=n)
+        except ai.Cancelled:
+            result, n = None, 0
+            self.status("IA rostros: detenido")
         except Exception as exc:
             result, n = None, 0
-            self.window.signals.ai_status.emit(f"IA rostros: error — {exc}")
+            self.status(f"IA rostros: error — {exc}")
         self.window.on_ai_faces_done(str(self.path), result, n)
 
 
@@ -1343,6 +1444,19 @@ class MainWindow(QMainWindow):
         self.decoding = set()
         self.gen = 0
         self.thumb_cancel = {"stop": False}
+        # testigo de "Detener": los trabajos de IA se quedan con el que haya
+        # al crearse y lo consultan en cada punto de control (ver AIJob)
+        self.ai_cancel = {"stop": False}
+        self.ai_paused = False    # tras Detener, la IA guardada no se relanza
+                                  # sola hasta que vuelvas a pedirla
+        # trabajos detenidos a medias que hay que borrar del historial
+        # (los rellena el hilo de trabajo, los atiende el de la interfaz)
+        self.erase_undo_request = None
+        self.heal_undo_request = None
+        # borrados generativos con el hilo aun vivo (incluye los que se
+        # detuvieron y todavia no han soltado la GPU): dos a la vez no
+        # caben en 8 GB de VRAM
+        self.erase_alive = 0
         self.thumb_pixmaps = {}           # path -> miniatura sin insignia
         self.mask_ai_cache = {}           # path -> {"subject": mapa 0..1}
         self.mask_ai_running = set()
@@ -1374,6 +1488,14 @@ class MainWindow(QMainWindow):
         self.final_timer.setInterval(450)
         self.final_timer.timeout.connect(lambda: self.request_render(final=True))
 
+        # los modelos de IA se quedan cargados en la GPU para no recargarlos
+        # a cada uso; si pasas un buen rato sin IA, se devuelven solos (en
+        # una tarjeta de 8 GB compartida con otras apps se nota mucho)
+        self.idle_free_timer = QTimer(self)
+        self.idle_free_timer.setSingleShot(True)
+        self.idle_free_timer.setInterval(self.IDLE_FREE_MIN * 60_000)
+        self.idle_free_timer.timeout.connect(self.free_gpu)
+
         self._build_ui()
         self._build_toolbar()
         self.refresh_presets()
@@ -1395,6 +1517,7 @@ class MainWindow(QMainWindow):
 
         self.preview = PhotoView()
         self.status_chip = BusyChip(self.preview)
+        self.status_chip.cancelled.connect(self.cancel_ai)
         self._last_status = ""
         self.preview.zoomChanged.connect(
             lambda s: self.statusBar().showMessage(f"Zoom: {s * 100:.0f} %"))
@@ -2088,6 +2211,24 @@ class MainWindow(QMainWindow):
         undo.triggered.connect(self.undo_heal)
         self.addAction(undo)
 
+        tb.addSeparator()
+
+        # Detener la IA: apagado mientras no hay nada calculando, y en rojo
+        # cuando si lo hay (asi de un vistazo sabes si trabaja en segundo
+        # plano). Lo enciende y apaga _update_busy.
+        self._stop_icon_idle = icon("mdi6.stop-circle-outline")
+        self._stop_icon_busy = icon("mdi6.stop-circle", color="#e0554e")
+        self.a_stop_ai = QAction(self._stop_icon_idle, "Detener IA", self)
+        self.a_stop_ai.setShortcut(QKeySequence("Esc"))
+        self.a_stop_ai.setToolTip(
+            "Detiene el trabajo de IA en marcha (ruido, rostros, corrector,\n"
+            "borrado generativo, máscaras). Atajo: Esc.\n"
+            "La tarjeta gráfica puede tardar unos segundos en soltar el\n"
+            "último paso; lo calculado a medias se descarta.")
+        self.a_stop_ai.setEnabled(False)
+        self.a_stop_ai.triggered.connect(self.cancel_ai)
+        tb.addAction(self.a_stop_ai)
+
     # ---------- carpeta y miniaturas ----------
 
     def open_folder(self):
@@ -2235,6 +2376,7 @@ class MainWindow(QMainWindow):
             self._save_masks()
         path = item.data(Qt.UserRole)
         self.current_path = path
+        self.ai_paused = False   # foto nueva, la pausa del Detener no aplica
         if self.a_original.isChecked():
             self.a_original.blockSignals(True)
             self.a_original.setChecked(False)
@@ -2374,6 +2516,8 @@ class MainWindow(QMainWindow):
     # ---------- reduccion de ruido IA ----------
 
     def run_ai_denoise(self, _checked=False, path=None):
+        if path is None:
+            self.ai_paused = False   # lo pides tu: se acabo la pausa
         path = path or self.current_path
         if not path or path not in self.base_cache or path in self.ai_running:
             return
@@ -2418,17 +2562,89 @@ class MainWindow(QMainWindow):
         if self.status_chip.isVisible():
             self.status_chip.show_text(msg)
 
+    def _ai_busy(self):
+        """Trabajos de IA en marcha (el decodificado no cuenta: es corto y
+        no se puede detener)."""
+        return (self.ai_running or self.face_running or self.heal_running
+                or self.erase_running or self.mask_ai_running
+                or self.face_parse_running)
+
+    def cancel_ai(self):
+        """Detiene la IA en marcha: ✕ de la pildora o tecla Esc.
+
+        Marca el testigo de parada (cada trabajo aborta en su proximo punto
+        de control) y libera la interfaz al momento, sin esperarlos: el aro
+        deja de girar y la app vuelve a ser usable aunque la GPU tarde unos
+        segundos en soltar el paso que ya tenia entre manos. Lo calculado a
+        medias se descarta.
+
+        Ademas deja la IA "en pausa" para esta foto: si no, los procesos
+        guardados (ruido, rostros, mascaras) se relanzarian solos al llegar
+        el resultado vacio y volveriamos a empezar."""
+        if not self._ai_busy():
+            self.statusBar().showMessage("No hay ningún trabajo de IA en marcha")
+            return
+        self.ai_cancel["stop"] = True
+        self.ai_cancel = {"stop": False}   # los proximos trabajos, limpios
+        self.ai_paused = True
+        for running in (self.ai_running, self.face_running, self.heal_running,
+                        self.erase_running, self.mask_ai_running,
+                        self.face_parse_running):
+            running.clear()
+        self._pending_ai_mask = None
+        self._pending_face_part = None
+        self.ai_btn.setEnabled(True)
+        self.face_btn.setEnabled(True)
+        self._last_status = ""
+        self._update_busy()
+        # si pides parar es porque quieres tu tarjeta de vuelta: ademas de
+        # cortar el trabajo, se sueltan los modelos que tenia residentes
+        self.free_gpu(quiet=True)
+        self.statusBar().showMessage(
+            "IA detenida y tarjeta gráfica liberada — puede tardar unos "
+            "segundos en soltar el último paso")
+
+    IDLE_FREE_MIN = 5   # minutos sin IA antes de devolver la GPU sola
+
+    def free_gpu(self, quiet=False):
+        """Descarga los modelos de IA de la tarjeta grafica."""
+        self.idle_free_timer.stop()
+        ai.release_all_sessions()
+        if not quiet:
+            self.statusBar().showMessage(
+                f"Sin usar la IA {self.IDLE_FREE_MIN} min: modelos "
+                "descargados de la tarjeta gráfica (se recargan solos "
+                "cuando los vuelvas a usar)")
+
+    def _touch_ai_idle(self):
+        """Reinicia la cuenta atras para devolver la GPU. Se llama cada vez
+        que termina un trabajo: mientras encadenes ediciones con IA los
+        modelos siguen calientes, y solo se sueltan si de verdad los dejas
+        de usar."""
+        if self._ai_busy():
+            self.idle_free_timer.stop()
+        else:
+            self.idle_free_timer.start()
+
     def _update_busy(self):
         working = bool(self.ai_running or self.face_running
                        or self.heal_running or self.decoding
                        or self.mask_ai_running or self.face_parse_running
                        or self.erase_running)
         self.busy_bar.setVisible(working)
+        # el boton de la barra solo se puede pulsar (y se pone rojo) cuando
+        # hay IA que detener; el decodificado no cuenta, no se puede parar
+        stoppable = bool(self._ai_busy())
+        if self.a_stop_ai.isEnabled() != stoppable:
+            self.a_stop_ai.setEnabled(stoppable)
+            self.a_stop_ai.setIcon(self._stop_icon_busy if stoppable
+                                   else self._stop_icon_idle)
         if working:
             self.status_chip.show_text(self._last_status or "Procesando…")
         else:
             self._last_status = ""
             self.status_chip.hide_chip()
+        self._touch_ai_idle()
 
     # ---------- pincel corrector ----------
 
@@ -2452,6 +2668,7 @@ class MainWindow(QMainWindow):
         """Al soltar el raton: trazo de mascara o borrado del corrector."""
         if not self.preview.has_strokes():
             return
+        self.ai_paused = False   # lo pides tu: se acabo la pausa
         if self.mask_refine_sign:
             strokes = [[r, pts, self.mask_refine_sign]
                        for r, pts in self.preview.take_strokes()]
@@ -2544,6 +2761,15 @@ class MainWindow(QMainWindow):
     # ---------- borrado generativo ----------
 
     def run_generative_erase(self):
+        self.ai_paused = False   # lo pides tu: se acabo la pausa
+        if self.erase_alive:
+            # tipico tras Detener: el hilo anterior sigue en la GPU. Lanzar
+            # otro cargaria dos veces el modelo (~2 GB cada uno) y la 4070
+            # de 8 GB se desbordaria, que es justo lo que la vuelve lentisima
+            self.statusBar().showMessage(
+                "Espera unos segundos: el borrado anterior aún está "
+                "soltando la tarjeta gráfica")
+            return
         path = self.current_path
         m = self._current_mask()
         if m is None:
@@ -2600,21 +2826,27 @@ class MainWindow(QMainWindow):
             list(self.current_edits.get("erase_ops", [])) + [op])
         self.store.set(path, self.current_edits)
         self.erase_running.add(path)
-        # la base ya lleva los borrados anteriores: solo se aplica el nuevo
-        self.pool.start(EraseJob(path, base, [op], self))
+        self.erase_alive += 1
+        # la base ya lleva los borrados anteriores: solo se aplica el nuevo.
+        # drop_on_cancel: si lo detienes, este borrado no debe quedar guardado
+        self.pool.start(EraseJob(path, base, [op], self, drop_on_cancel=True))
         self._update_busy()
         self.statusBar().showMessage(
-            "Borrado generativo en marcha… (unos segundos)")
+            "Borrado generativo en marcha… (unos segundos · Esc o ✕ para parar)")
 
     def _autorun_erase(self, path):
         """Re-aplica los borrados generativos guardados al reabrir la foto.
         Devuelve True si lanzo el trabajo (encadena la demas IA al acabar)."""
+        if self.ai_paused or self.erase_alive:
+            return False   # detenida a proposito (o el hilo anterior sigue
+                           # soltando la GPU): el borrado guardado espera
         ops = self.current_edits.get("erase_ops")
         if (ops and path not in self.erased
                 and path not in self.erase_running
                 and path in self.base_cache
                 and generative.model_available()):
             self.erase_running.add(path)
+            self.erase_alive += 1
             self.pool.start(EraseJob(path, self.base_cache[path],
                                      list(ops), self))
             self._update_busy()
@@ -2623,6 +2855,9 @@ class MainWindow(QMainWindow):
 
     def on_erased(self, path, result, union_map):
         # Llamado desde el hilo de trabajo: guarda y avisa por señal.
+        # Aqui acaba el trabajo de verdad (tambien si se detuvo): a partir
+        # de ahora la GPU esta libre para otro borrado.
+        self.erase_alive = max(self.erase_alive - 1, 0)
         self.erase_running.discard(path)
         if result is not None:
             self.base_cache[path] = result
@@ -2639,10 +2874,40 @@ class MainWindow(QMainWindow):
                                 if k[0] != path}
         self.signals.erase_ready.emit(path)
 
-    def on_erase_ready(self, path):
-        self._update_busy()
-        if path != self.current_path:
+    def _drop_heal_strokes(self, path, strokes):
+        """Igual que _drop_erase_ops, para los trazos del corrector que se
+        quedaron sin aplicar al detener el trabajo."""
+        if path != self.current_path or not self.store:
             return
+        self.current_edits["heal_strokes"] = [
+            s for s in self.current_edits.get("heal_strokes", [])
+            if not any(s is dropped for dropped in strokes)]
+        self.store.set(path, self.current_edits)
+        stack = self.heal_undo.get(path)
+        if stack:
+            stack.pop()
+
+    def _drop_erase_ops(self, path, ops):
+        """Quita del historial un borrado generativo que se detuvo a medias:
+        no llego a aplicarse, asi que no debe quedar guardado ni reintentarse
+        al reabrir la foto. Tambien sobra su instantanea de Ctrl+Z."""
+        if path != self.current_path or not self.store:
+            return
+        self.current_edits["erase_ops"] = [
+            o for o in self.current_edits.get("erase_ops", [])
+            if not any(o is dropped for dropped in ops)]
+        self.store.set(path, self.current_edits)
+        stack = self.heal_undo.get(path)
+        if stack:
+            stack.pop()
+
+    def on_erase_ready(self, path):
+        req, self.erase_undo_request = self.erase_undo_request, None
+        if req is not None and req[0] == path:
+            self._drop_erase_ops(path, req[1])
+        self._update_busy()
+        if path != self.current_path or self.ai_paused:
+            return   # detenido: ni mensaje de "listo" ni encadenar mas IA
         self.statusBar().showMessage("Borrado generativo: listo")
         self.request_render()
         self._autorun_ai(path)
@@ -2670,9 +2935,12 @@ class MainWindow(QMainWindow):
         self.signals.heal_ready.emit(path)
 
     def on_heal_ready(self, path):
+        req, self.heal_undo_request = self.heal_undo_request, None
+        if req is not None and req[0] == path:
+            self._drop_heal_strokes(path, req[1])
         self._update_busy()
-        if path != self.current_path:
-            return
+        if path != self.current_path or self.ai_paused:
+            return   # detenido: ni mensaje de "listo" ni encadenar mas IA
         self.statusBar().showMessage("Corrector: listo")
         self.request_render()
         if not self._autorun_erase(path):
@@ -2683,6 +2951,8 @@ class MainWindow(QMainWindow):
 
     def _autorun_ai(self, path):
         """Relanza los procesos IA guardados de la foto si aun no hay cache."""
+        if self.ai_paused:
+            return   # acabas de pulsar Detener: no volver a arrancarla sola
         masks = self.current_edits.get("masks") or []
         adj = [m.get("adjust") or {} for m in masks]
         need_den = any(a.get("ai_denoise") for a in adj)
@@ -2725,6 +2995,8 @@ class MainWindow(QMainWindow):
             f"Modelo de rostros: {faces.current_model()} — vuelve a pulsar Retocar")
 
     def run_ai_faces(self, _checked=False, path=None):
+        if path is None:
+            self.ai_paused = False   # lo pides tu: se acabo la pausa
         path = path or self.current_path
         if not path or path not in self.base_cache or path in self.face_running:
             return
@@ -3086,6 +3358,7 @@ class MainWindow(QMainWindow):
     def _ensure_mask_ai(self, key):
         """Un deslizador IA de mascara necesita el analisis IA de la foto;
         si aun no esta calculado ni en marcha, se lanza una sola vez."""
+        self.ai_paused = False   # mover el deslizador ya es pedirla
         path = self.current_path
         if not path or path not in self.base_cache:
             return
@@ -3207,6 +3480,7 @@ class MainWindow(QMainWindow):
                 "Pinta sobre la foto para QUITAR esa zona de la máscara")
 
     def add_ai_mask(self, kind):
+        self.ai_paused = False   # lo pides tu: se acabo la pausa
         path = self.current_path
         if not path or path not in self.base_cache:
             return
@@ -3250,6 +3524,7 @@ class MainWindow(QMainWindow):
             self.mask_ai_cache.pop(next(iter(self.mask_ai_cache)))
 
     def add_face_mask(self, part):
+        self.ai_paused = False   # lo pides tu: se acabo la pausa
         path = self.current_path
         if not path or path not in self.base_cache:
             return
@@ -3786,6 +4061,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.thumb_cancel["stop"] = True
+        # Detener la IA al cerrar. Sin esto, Qt espera educadamente a que el
+        # trabajo en curso termine antes de acabar el proceso: cerrabas la
+        # ventana, desaparecia de la pantalla... y PhotoRAW seguia vivo e
+        # invisible quemando la GPU hasta acabar el borrado (asi aparecio un
+        # proceso fantasma con 10 minutos de CPU y sin ninguna ventana).
+        self.ai_cancel["stop"] = True
+        self.pool.clear()        # los trabajos que aun no habian empezado
+        self.fast_pool.clear()
         if self.mask_save_timer.isActive():
             self.mask_save_timer.stop()
             self._save_masks()

@@ -20,6 +20,16 @@ DENOISE_URL = ("https://huggingface.co/deepghs/image_restoration"
 _session = None
 
 
+class Cancelled(Exception):
+    """El usuario pulso Detener mientras trabajaba la IA.
+
+    Los trabajos largos avisan de su avance con `progress_cb`; ese mismo
+    aviso es el punto de control: si se pidio parar, el callback lanza esta
+    excepcion y el trabajo se deshace solo desde dentro. Cada modulo que
+    atrape excepciones alrededor de un paso de IA debe dejarla pasar (o el
+    Detener se queda en nada)."""
+
+
 def model_available():
     return DENOISE_MODEL.exists() and DENOISE_MODEL.stat().st_size > 10_000_000
 
@@ -106,6 +116,26 @@ def _get_cpu_session():
             str(DENOISE_MODEL), sess_options=_make_options(),
             providers=["CPUExecutionProvider"])
     return _cpu_session
+
+
+def release_all_sessions():
+    """Suelta de la tarjeta grafica TODOS los modelos cargados.
+
+    PhotoRAW los deja residentes para no recargarlos en cada uso (son
+    segundos cada uno), pero en una tarjeta de 8 GB compartida con otras
+    apps eso se acumula: SCUNet + LaMa + ESRGAN + u2net + rostros suman
+    varios GB que se quedan ocupados aunque no se este calculando nada.
+
+    Es seguro llamarla mientras un trabajo esta usando un modelo: aqui solo
+    se suelta la referencia del modulo, y Python no destruye la sesion
+    hasta que el hilo que la usa termina con su propia referencia."""
+    global _session, _cpu_session
+    _session = _cpu_session = None
+    from photoraw import face_parse, faces, generative, heal, masks_ai, upscale
+    for mod in (face_parse, heal, masks_ai, upscale):
+        mod._session = None
+    faces._sessions.clear()
+    generative._sessions.clear()
 
 
 def _tile_is_bad(x_in, y_out):

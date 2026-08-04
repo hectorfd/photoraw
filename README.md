@@ -81,6 +81,22 @@ Los modelos se descargan una sola vez al usarlos y quedan en
 - **Píldora de progreso** flotante sobre la foto: aro girando + estado de lo
   que trabaja en segundo plano, con porcentaje en ruido IA, corrector y
   borrado generativo.
+- **Detener la IA**: botón **Detener IA** en la barra de herramientas —
+  apagado en gris cuando no hay nada calculando, **rojo** mientras la IA
+  trabaja, así que de un vistazo sabes si hay algo en marcha. También la ✕
+  de la píldora flotante o la tecla `Esc`. Corta el trabajo
+  en marcha. El aro para al instante y la app vuelve a responder; la GPU
+  puede tardar unos segundos más en soltar el paso que ya tenía entre manos
+  (una llamada al modelo no se puede interrumpir a medias). Lo que se
+  quedó a medio calcular se descarta: un borrado generativo o unos trazos
+  del corrector detenidos **no** quedan guardados. Detener **también
+  devuelve la tarjeta gráfica**: descarga los modelos que estaban
+  residentes (se recargan solos al volver a usarlos). Y si pasas
+  5 minutos sin usar la IA, se sueltan igualmente sin que hagas nada.
+  **Cerrar la ventana también detiene la IA**: antes el proceso seguía vivo e invisible
+  quemando la GPU hasta acabar el trabajo. Después del Detener la
+  IA guardada de esa foto queda en pausa y no se relanza sola, hasta que
+  vuelvas a pedirla (o cambies de foto).
 - **Restaurar foto**: borra toda la edición (con confirmación).
 - **Corrector** (tecla `B`): pinta y suelta para borrar; Ctrl+Z deshace.
 - **Copiar/Pegar ajustes** (Ctrl+Shift+C/V) a varias fotos, **preajustes**
@@ -195,7 +211,65 @@ photoraw/
 - El techo de calidad restante es el modelo (Realistic Vision 5.1, clase
   SD 1.5): es lo razonable para 8 GB. SDXL/FLUX no entran cómodos.
 
+**Hecho (2026-08-03):**
+- **Botón de Detener la IA** (queja de Héctor: cuando el borrado generativo
+  se atasca, el aro gira para siempre y no hay forma de pararlo). Tres vías:
+  botón **Detener IA** en la barra (`a_stop_ai`, gris/rojo según haya trabajo
+  — lo conmuta `_update_busy`, y lleva el atajo `Esc`) y la ✕ de la píldora.
+  No encontró la ✕ porque la píldora solo existe mientras la IA trabaja: de
+  ahí el botón fijo.
+  - `ai.Cancelled` + `AIJob` (clase base de los 6 trabajos de IA en
+    `main_window.py`): cada trabajo se queda al crearse con un «testigo»
+    (`window.ai_cancel`), y `AIJob.progress()` envuelve el `progress_cb` que
+    ya usaban los módulos, así que **los puntos de progreso existentes son
+    los puntos de control** — no hizo falta instrumentar los bucles.
+  - Al pulsar Detener, la ventana marca el testigo viejo y estrena uno
+    limpio (los trabajos nuevos no heredan la cancelación), vacía los
+    conjuntos `*_running` y apaga la píldora **sin esperar** al hilo: una
+    llamada al modelo ya lanzada en la GPU no se puede interrumpir desde
+    Python, y bloquear la interfaz por eso era justo el problema.
+  - Cuidado con los `except Exception` que rodean pasos de IA: en
+    `generative.py` la escalera de reintentos 768→640→512 y `_sharpen_patch`
+    se tragaban la cancelación (reintentaban en vez de abortar). Ambos
+    dejan pasar `Cancelled` ahora.
+  - Un borrado generativo o unos trazos del corrector detenidos se **quitan**
+    del historial (`_drop_erase_ops` / `_drop_heal_strokes`): no llegaron a
+    aplicarse, así que no deben guardarse ni reintentarse al reabrir. El
+    hilo de trabajo solo deja el aviso (`erase_undo_request`), lo ejecuta el
+    hilo de la interfaz. Re-aplicar borrados ya guardados NO los borra
+    (`drop_on_cancel=False`).
+  - `ai_paused`: tras Detener, `_autorun_ai` / `_autorun_erase` no relanzan
+    la IA guardada (si no, el resultado vacío disparaba otra vuelta y volvía
+    a empezar). Se levanta al pedir IA a mano o al cambiar de foto.
+  - Al abortar un borrado se llama a `generative.release_sessions()`: suelta
+    los ~2 GB de VRAM en vez de dejarlos ocupados.
+- **PhotoRAW fantasma (el fallo gordo que salió de esto)**: `closeEvent` no
+  paraba la IA, y `QThreadPool` **espera** a los QRunnable en curso antes de
+  dejar morir el proceso. Resultado: cerrabas la ventana, desaparecía de la
+  pantalla y PhotoRAW seguía vivo **sin ninguna ventana** quemando la GPU
+  hasta acabar el borrado. Así se acumularon 4 procesos peleándose por los
+  8 GB (uno con 590 s de CPU, VRAM al 100 % y solo 499 MiB libres) — lo que
+  a su vez hacía que cada paso de difusión tardase muchísimo. `closeEvent`
+  ahora marca `ai_cancel` y vacía las colas (`pool.clear()`), así que cerrar
+  la ventana corta de verdad. Medido: con un trabajo de 60 s en marcha, el
+  proceso muere en 1,5 s; el control sin cancelación sobrevivía a la
+  ventana los 8 s enteros del trabajo.
+  **Si algo va lentísimo, mira primero cuántos pythonw hay vivos.**
+- **Modelos residentes = VRAM ocupada sin estar trabajando.** Los 7 módulos
+  guardaban su `InferenceSession` en un global y no la soltaban nunca:
+  SCUNet + LaMa + ESRGAN + u2net + rostros + BiSeNet acaban sumando GB
+  aunque no se calcule nada (Héctor lo vio en el Administrador de tareas y
+  creyó que la tarjeta seguía «quemando»; era memoria reservada, no
+  trabajo: 0,0 s de CPU en 6 s y 45 °C). Nuevo `ai.release_all_sessions()`
+  (seguro con trabajos en vuelo: solo suelta la referencia del módulo, el
+  hilo que la usa mantiene viva la suya) llamado desde Detener y desde un
+  temporizador de `IDLE_FREE_MIN` = 5 min sin IA. Efecto secundario bueno:
+  con más VRAM libre, `_pick_size` puede elegir 640 px en vez de 512 y el
+  borrado sale con mejor textura.
+
 **Falta que Héctor pruebe** (reiniciar PhotoRAW primero): repasar el
 corrector en la nariz (borrar los trazos feos y volver a pintar), abrir una
-foto editada dos veces (la 2.ª debe ser inmediata), miniaturas derechas, y
-rehacer el «Borrar con IA» del pasto (se recalculará solo a 640 px).
+foto editada dos veces (la 2.ª debe ser inmediata), miniaturas derechas,
+rehacer el «Borrar con IA» del pasto (se recalculará solo a 640 px), y
+**detener un borrado generativo a media difusión** (debe parar en unos
+segundos y no dejar el borrado guardado).

@@ -21,7 +21,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from photoraw.ai import MODEL_DIR, _make_options, _providers, _setup_dll_paths
+from photoraw.ai import (MODEL_DIR, Cancelled, _make_options, _providers,
+                         _setup_dll_paths)
 
 SD_DIR = MODEL_DIR / "sd_inpaint"
 SD_BASE_URL = ("https://huggingface.co/RanaLLC/"
@@ -305,6 +306,8 @@ def _sharpen_patch(out_s, cw, ch, progress_cb=None):
                                       progress_cb=progress_cb)
                 big = big.astype(np.float32) / 255.0
                 return cv2.resize(big, (cw, ch), interpolation=cv2.INTER_AREA)
+        except Cancelled:
+            raise  # Detener no es un fallo del afinado: aborta de verdad
         except Exception:
             pass  # sin superresolucion: se estira normal (mas blando)
     return cv2.resize(out_s, (cw, ch), interpolation=cv2.INTER_LINEAR)
@@ -402,6 +405,8 @@ def erase(img, mask_map, seed=0, progress_cb=None):
                 out_s = _diffuse(crop_s, mask_s, seed + i,
                                  lambda p: report(p * 0.85))
                 break
+            except Cancelled:
+                raise  # el usuario paro: no bajar de tamano y reintentar
             except Exception:
                 if size == 512:
                     raise
