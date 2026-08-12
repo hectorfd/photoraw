@@ -847,6 +847,7 @@ class PhotoView(QGraphicsView):
     colorPicked = Signal(QColor)
     cropChanged = Signal(list)
     maskDrawn = Signal(str, dict)
+    maskDragging = Signal(str, dict)  # mientras dibujas: mascara de mentira
     maskEdited = Signal(bool)  # True mientras se arrastra, False al soltar
 
     _HANDLES = ["tl", "t", "tr", "l", "r", "bl", "b", "br"]
@@ -1133,23 +1134,46 @@ class PhotoView(QGraphicsView):
         self._update_mask_handles()
         self.maskEdited.emit(True)
 
-    def _finish_mask_drag(self, scene_pos):
+    def _mask_drag_params(self, scene_pos):
+        """Parametros de la mascara que estas dibujando ahora mismo, con el
+        raton todavia apretado. None si la foto aun no tiene tamano."""
         p0 = self._mask_drag
-        self._mask_drag = None
         w = self._item.pixmap().width()
         h = self._item.pixmap().height()
-        if not w or not h:
-            return
+        if p0 is None or not w or not h:
+            return None
         cl = lambda v: min(max(v, 0.0), 1.0)
         if self._mask_draw == "linear":
-            params = {"x0": cl(p0.x() / w), "y0": cl(p0.y() / h),
-                      "x1": cl(scene_pos.x() / w), "y1": cl(scene_pos.y() / h)}
-        else:  # radial: del centro hacia afuera
-            params = {"cx": cl(p0.x() / w), "cy": cl(p0.y() / h),
-                      "rx": max(abs(scene_pos.x() - p0.x()) / w, 0.02),
-                      "ry": max(abs(scene_pos.y() - p0.y()) / h, 0.02),
-                      "feather": 50.0}
-        self.maskDrawn.emit(self._mask_draw, params)
+            return {"x0": cl(p0.x() / w), "y0": cl(p0.y() / h),
+                    "x1": cl(scene_pos.x() / w), "y1": cl(scene_pos.y() / h)}
+        # radial: del centro hacia afuera
+        return {"cx": cl(p0.x() / w), "cy": cl(p0.y() / h),
+                "rx": max(abs(scene_pos.x() - p0.x()) / w, 0.02),
+                "ry": max(abs(scene_pos.y() - p0.y()) / h, 0.02),
+                "feather": 50.0}
+
+    def _preview_mask_drag(self, scene_pos):
+        """Ensena la mascara MIENTRAS la arrastras: la linea (o la elipse) con
+        sus tiradores y, por encima, el velo azul de la zona afectada. Antes
+        no se veia absolutamente nada hasta soltar el boton, asi que dibujabas
+        a ciegas y solo al final descubrias donde habia quedado."""
+        params = self._mask_drag_params(scene_pos)
+        if params is None:
+            return
+        self._mask_edit = {"type": self._mask_draw, **params}
+        self._update_mask_handles()
+        self.maskDragging.emit(self._mask_draw, self._mask_edit)
+
+    def _finish_mask_drag(self, scene_pos):
+        params = self._mask_drag_params(scene_pos)
+        kind = self._mask_draw
+        self._mask_drag = None
+        # se suelta la mascara de mentira del arrastre: la de verdad llega
+        # enseguida por maskDrawn -> _create_mask -> set_mask_handles
+        self._mask_edit = None
+        if params is None:
+            return
+        self.maskDrawn.emit(kind, params)
 
     # ---- marco de recorte ----
 
@@ -1445,6 +1469,9 @@ class PhotoView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._mask_draw and self._mask_drag is not None:
+            self._preview_mask_drag(self.mapToScene(event.position().toPoint()))
+            return
         if self._mask_edit_drag is not None:
             self._drag_mask_handle(self.mapToScene(event.position().toPoint()))
             return
@@ -1848,6 +1875,7 @@ class MainWindow(QMainWindow):
         self.panel_stack.addWidget(self._build_crop_panel())
         self.panel_stack.addWidget(self._build_mask_panel())
         self.preview.maskDrawn.connect(self.on_mask_drawn)
+        self.preview.maskDragging.connect(self.on_mask_dragging)
         self.preview.maskEdited.connect(self.on_mask_edited)
         # el velo rojo se recalcula con un pequeno retraso durante arrastres
         self.overlay_timer = QTimer(self)
@@ -4022,6 +4050,15 @@ class MainWindow(QMainWindow):
         if m is None:
             self.preview.set_mask_overlay(None)
             return
+        self._show_mask_overlay(m)
+
+    def on_mask_dragging(self, _kind, mask):
+        """Velo azul en vivo mientras arrastras una mascara nueva."""
+        if self.panel_stack.currentIndex() == 2 and self.preview._has_photo:
+            self._show_mask_overlay(mask)
+
+    def _show_mask_overlay(self, m):
+        """Pinta el velo azul de la mascara `m` sobre la foto."""
         if (not self.mask_show_overlay.isChecked()
                 or getattr(self, "_overlay_suspended", False)):
             self.preview.set_mask_overlay(None)
