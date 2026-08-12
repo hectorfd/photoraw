@@ -4442,6 +4442,49 @@ class MainWindow(QMainWindow):
 
     # ---------- exportar ----------
 
+    def _export_ai_step(self, path, key, work, label, progress, meta=False):
+        """Un paso de IA de la exportacion, con memoria en el disco.
+
+        Los modelos trabajan aqui sobre la foto ENTERA (no sobre la vista
+        previa reducida), y eso son minutos: ~1 s por cada mosaico de 512 px,
+        117 mosaicos en una foto de 24 MP. Guardar el resultado hace que la
+        segunda exportacion de la misma foto -- reexportar a otra carpeta,
+        cambiar de tamano de salida, repetir el lote -- salga al instante.
+
+        La clave lleva la huella de la imagen de entrada y de los ajustes, asi
+        que si tocas el revelado el resultado guardado deja de valer solo."""
+        hit = diskcache.load_result(path, key)
+        if hit is not None:
+            return hit if meta else hit[0]
+        progress.setLabelText(label)
+        QApplication.processEvents()
+        result = work()
+        if meta:
+            diskcache.save_result(path, key, result[0], meta=result[1])
+        else:
+            diskcache.save_result(path, key, result)
+        return result
+
+    @staticmethod
+    def _q8(arr):
+        """Redondea a 8 bits, que es como se guarda en el cache. Sin esto la
+        huella de los pasos siguientes cambiaria entre la exportacion que
+        calcula y la que lee de cache, y ya nunca acertarian."""
+        return (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(
+            np.uint8).astype(np.float32) / 255.0
+
+    @staticmethod
+    def _export_progress(progress, label):
+        """Callback de porcentaje para los modelos: ademas de mover la barra,
+        atiende al boton Cancelar (antes la ventana se quedaba clavada en 0 %
+        durante los minutos que tardaba la IA)."""
+        def cb(p):
+            if progress.wasCanceled():
+                raise ai.Cancelled()
+            progress.setLabelText(f"{label} {min(int(p * 100), 99)} %")
+            QApplication.processEvents()
+        return cb
+
     def export_selected(self):
         items = self.film.selectedItems()
         if not items:
@@ -4498,33 +4541,53 @@ class MainWindow(QMainWindow):
                 edits = engine.full_edits(self.store.get(path))
                 strokes = edits.get("heal_strokes")
                 if strokes and heal.model_available():
-                    progress.setLabelText(f"Corrector en {path.name}…")
-                    QApplication.processEvents()
-                    mask = heal.rasterize_strokes(strokes, *base.shape[:2])
-                    base = heal.inpaint(base, mask)
+                    def do_heal(b=base, s=strokes):
+                        mask = heal.rasterize_strokes(s, *b.shape[:2])
+                        return self._q8(heal.inpaint(
+                            b, mask,
+                            progress_cb=self._export_progress(
+                                progress, f"Corrector en {path.name}…")))
+                    base = self._export_ai_step(
+                        path, "heal2-" + diskcache.result_key(base, strokes),
+                        do_heal, f"Corrector en {path.name}…", progress)
                 erase_ops = edits.get("erase_ops")
                 if erase_ops and generative.model_available():
-                    for op in erase_ops:
-                        progress.setLabelText(
-                            f"Borrado generativo en {path.name}… (puede tardar)")
-                        QApplication.processEvents()
-                        hb, wb = base.shape[:2]
-                        wmap = generative.decode_map(op["map"], hb, wb)
-                        if wmap is not None:
-                            base = generative.erase(
-                                base, wmap, seed=int(op.get("seed", 0)))
+                    def do_erase(b=base, ops=erase_ops):
+                        out = b
+                        for j, op in enumerate(ops):
+                            hb, wb = out.shape[:2]
+                            wmap = generative.decode_map(op["map"], hb, wb)
+                            if wmap is None:
+                                continue
+                            out = generative.erase(
+                                out, wmap, seed=int(op.get("seed", 0)),
+                                progress_cb=self._export_progress(
+                                    progress,
+                                    f"Borrado generativo en {path.name}… "
+                                    f"({j + 1}/{len(ops)})"))
+                        return self._q8(out)
+                    base = self._export_ai_step(
+                        path,
+                        "erase2-" + diskcache.result_key(
+                            base, json.dumps(erase_ops, sort_keys=True,
+                                             default=str)),
+                        do_erase,
+                        f"Borrado generativo en {path.name}… (puede tardar)",
+                        progress)
                 ai_masks = {}
                 mask_types = {m.get("type")
                               for m in (edits.get("masks") or [])}
                 if (mask_types & {"subject", "background"}
                         and masks_ai.model_available()):
-                    progress.setLabelText(f"Máscara IA en {path.name}…")
-                    QApplication.processEvents()
-                    ai_masks["subject"] = masks_ai.subject_mask(base)
+                    ai_masks["subject"] = self._export_ai_step(
+                        path, "subj-" + diskcache.result_key(base),
+                        lambda b=base: masks_ai.subject_mask(b),
+                        f"Máscara IA en {path.name}…", progress)
                 if "face_part" in mask_types and face_parse.model_available():
-                    progress.setLabelText(f"Retrato IA en {path.name}…")
-                    QApplication.processEvents()
-                    ai_masks["face_labels"] = face_parse.parse_labels(base)
+                    ai_masks["face_labels"] = self._export_ai_step(
+                        path, "fpl-" + diskcache.result_key(base),
+                        lambda b=base: face_parse.parse_labels(b),
+                        f"Retrato IA en {path.name}…", progress)
                 ai_masks = ai_masks or None
                 original = base
                 mask_adj = [m.get("adjust") or {}
@@ -4534,16 +4597,29 @@ class MainWindow(QMainWindow):
                 denoised = faced = None
                 amount = edits.get("ai_denoise", 0.0) / 100.0
                 if (amount > 0 or need_den) and ai.model_available():
-                    progress.setLabelText(f"IA en {path.name}… (puede tardar un rato)")
-                    QApplication.processEvents()
-                    denoised = ai.denoise(base)
+                    denoised = self._export_ai_step(
+                        path, "den-" + diskcache.result_key(base),
+                        lambda b=base: ai.denoise(
+                            b, progress_cb=self._export_progress(
+                                progress, f"Ruido IA en {path.name}…")),
+                        f"IA en {path.name}… (puede tardar un rato)", progress)
                     if amount > 0:
                         base = base * (1.0 - amount) + denoised * amount
                 f_amount = edits.get("ai_face", 0.0) / 100.0
                 if (f_amount > 0 or need_fac) and faces.models_available():
-                    progress.setLabelText(f"IA rostros en {path.name}…")
-                    QApplication.processEvents()
-                    faced, n = faces.enhance_faces(original)
+                    def do_faces(b=original):
+                        arr, n = faces.enhance_faces(
+                            b, progress_cb=self._export_progress(
+                                progress, f"IA rostros en {path.name}…"))
+                        # "no hay caras" tambien se guarda (array de mentira y
+                        # meta=0), si no se rebuscarian en cada exportacion
+                        return (arr, n) if n else (np.zeros((1, 1, 3), np.uint8), 0)
+                    faced, n = self._export_ai_step(
+                        path,
+                        f"fac-{faces.current_model()}-"
+                        + diskcache.result_key(original),
+                        do_faces, f"IA rostros en {path.name}…",
+                        progress, meta=True)
                     if not n:
                         faced = None
                     elif f_amount > 0:
@@ -4555,18 +4631,17 @@ class MainWindow(QMainWindow):
                     progress.setLabelText(
                         f"Superresolución {sr_scale}× en {path.name}…")
                     QApplication.processEvents()
-
-                    def sr_cb(p, name=path.name):
-                        progress.setLabelText(
-                            f"Superresolución {sr_scale}× en {name}… {p * 100:.0f} %")
-                        QApplication.processEvents()
-
-                    out = upscale.upscale(out.astype(np.float32) / 255.0,
-                                          scale=sr_scale, progress_cb=sr_cb)
+                    out = upscale.upscale(
+                        out.astype(np.float32) / 255.0, scale=sr_scale,
+                        progress_cb=self._export_progress(
+                            progress,
+                            f"Superresolución {sr_scale}× en {path.name}…"))
                 dest = out_dir / (path.stem + ".jpg")
                 cv2.imwrite(str(dest), cv2.cvtColor(out, cv2.COLOR_RGB2BGR),
                             [cv2.IMWRITE_JPEG_QUALITY, 92])
                 done += 1
+            except ai.Cancelled:
+                break    # pulsaste Cancelar mientras trabajaba un modelo
             except Exception as exc:
                 self.statusBar().showMessage(f"Error con {path.name}: {exc}")
         progress.setValue(len(items))
