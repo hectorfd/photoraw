@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
     QProgressDialog, QAbstractItemView, QGroupBox, QSizePolicy, QComboBox,
     QFrame, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QGraphicsEllipseItem, QGraphicsItem, QProgressBar, QStackedWidget,
-    QCheckBox, QMenu, QDialog,
+    QCheckBox, QMenu, QDialog, QStyledItemDelegate, QStyleOptionViewItem,
+    QStyle,
 )
 from PySide6.QtGui import QPen
 
@@ -167,18 +168,48 @@ CROP_SLIDERS = [
     ("straighten", "Enderezar", -450, 450, 10.0),
 ]
 
+# (etiqueta, valor, para que sirve, explicacion larga del tooltip)
 ASPECT_RATIOS = [
-    ("Libre",    None),
-    ("Original", "original"),
-    ("1 : 1",    1.0),
-    ("5 : 4",    5 / 4),
-    ("4 : 3",    4 / 3),
-    ("3 : 2",    3 / 2),
-    ("16 : 9",   16 / 9),
-    ("4 : 5",    4 / 5),
-    ("3 : 4",    3 / 4),
-    ("2 : 3",    2 / 3),
-    ("9 : 16",   9 / 16),
+    ("Libre",    None,
+     "recorta a ojo",
+     "Sin proporción fija: el marco toma la forma que quieras."),
+    ("Original", "original",
+     "la forma de tu cámara",
+     "Mantiene la proporción con la que disparaste la foto."),
+    ("1 : 1",    1.0,
+     "cuadrado · Instagram",
+     "Cuadrado: post clásico de Instagram, avatares y portadas de disco."),
+    ("5 : 4",    5 / 4,
+     "copia 20×25 cm",
+     "Horizontal poco alargado. Papel de 20×25 cm y marcos de pared "
+     "clásicos; recorta menos que 3:2 al imprimir."),
+    ("4 : 3",    4 / 3,
+     "móvil · Micro 4/3 · iPad",
+     "Horizontal compacto: cámara del móvil, sensores Micro 4/3, "
+     "tablets y diapositivas de presentación."),
+    ("3 : 2",    3 / 2,
+     "réflex · copia 10×15 cm",
+     "La proporción del negativo de 35 mm: réflex y mirrorless. Imprime "
+     "sin recortar en 10×15, 20×30 y 30×45 cm."),
+    ("16 : 9",   16 / 9,
+     "pantalla · vídeo · web",
+     "Panorámico de pantalla: TV, monitor, YouTube, portadas y cabeceras "
+     "de página web."),
+    ("4 : 5",    4 / 5,
+     "vertical de Instagram",
+     "Vertical del feed de Instagram: es el formato que más espacio ocupa "
+     "en el móvil sin ser pantalla completa."),
+    ("3 : 4",    3 / 4,
+     "retrato vertical · 15×20 cm",
+     "Vertical de móvil y de Micro 4/3. Papel de 15×20 cm."),
+    ("2 : 3",    2 / 3,
+     "vertical de réflex · 10×15 cm",
+     "El 3:2 girado: retratos y verticales de réflex, copia de 10×15 cm "
+     "en vertical."),
+    ("9 : 16",   9 / 16,
+     "Stories · Reels · TikTok",
+     "Pantalla completa del móvil: historias de Instagram, Reels, "
+     "TikTok y Shorts."),
 ]
 
 PARAM_SLIDERS = [
@@ -249,6 +280,43 @@ class NoWheelSlider(QSlider):
 class NoWheelCombo(QComboBox):
     def wheelEvent(self, event):
         event.ignore()
+
+
+class AspectItemDelegate(QStyledItemDelegate):
+    """Fila del desplegable: la proporción a la izquierda y para qué sirve,
+    en gris, a la derecha."""
+
+    PAD = 10
+    GAP = 18
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        name, use = opt.text, index.data(Qt.UserRole + 1) or ""
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+        rect = opt.rect.adjusted(self.PAD, 0, -self.PAD, 0)
+        fm = opt.fontMetrics
+        painter.save()
+        painter.setPen(QColor("#e8e8e8"))
+        painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter, name)
+        if use:
+            free = rect.width() - fm.horizontalAdvance(name) - self.GAP
+            if free > 20:
+                painter.setPen(QColor("#909090"))
+                painter.drawText(rect, Qt.AlignRight | Qt.AlignVCenter,
+                                 fm.elidedText(use, Qt.ElideRight, free))
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        fm = option.fontMetrics
+        use = index.data(Qt.UserRole + 1) or ""
+        width = (fm.horizontalAdvance(index.data(Qt.DisplayRole) or "")
+                 + fm.horizontalAdvance(use) + self.GAP + 2 * self.PAD)
+        return QSize(max(size.width(), width), max(size.height(), 26))
 
 
 # matiz central (grados) de cada banda del mezclador HSL
@@ -1846,12 +1914,25 @@ class MainWindow(QMainWindow):
         ar_label = QLabel("Proporción")
         ar_label.setMinimumWidth(92)
         self.aspect_combo = NoWheelCombo()
-        for label, _val in ASPECT_RATIOS:
+        for label, _val, use, tip in ASPECT_RATIOS:
             self.aspect_combo.addItem(label)
+            i = self.aspect_combo.count() - 1
+            self.aspect_combo.setItemData(i, use, Qt.UserRole + 1)
+            self.aspect_combo.setItemData(i, tip, Qt.ToolTipRole)
+        self.aspect_combo.setItemDelegate(AspectItemDelegate(self.aspect_combo))
+        # el desplegable se ensancha para que quepa el "para qué sirve"
+        self.aspect_combo.view().setMinimumWidth(
+            min(460, self.aspect_combo.view().sizeHintForColumn(0) + 24))
         self.aspect_combo.currentIndexChanged.connect(self.on_aspect_changed)
         ar_row.addWidget(ar_label)
         ar_row.addWidget(self.aspect_combo, 1)
         v.addLayout(ar_row)
+
+        self.aspect_hint = QLabel()
+        self.aspect_hint.setStyleSheet("color: #8a8a8a;")
+        self.aspect_hint.setWordWrap(True)
+        v.addWidget(self.aspect_hint)
+        self._update_aspect_hint(self.aspect_combo.currentIndex())
 
         grid = QGridLayout()
         grid.setVerticalSpacing(8)
@@ -3516,7 +3597,13 @@ class MainWindow(QMainWindow):
         else:
             self.request_render()
 
+    def _update_aspect_hint(self, index):
+        """Texto de ayuda con el uso típico de la proporción elegida."""
+        self.aspect_hint.setText(ASPECT_RATIOS[index][3])
+        self.aspect_combo.setToolTip(ASPECT_RATIOS[index][3])
+
     def on_aspect_changed(self, index):
+        self._update_aspect_hint(index)
         self.preview.set_crop_aspect(ASPECT_RATIOS[index][1])
 
     def on_crop_changed(self, norm):
