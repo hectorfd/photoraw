@@ -44,14 +44,40 @@ def _resize_max(img, max_side):
     return cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
+def _load_tiff16(path):
+    """TIFF de 16 bits por canal como uint16 RGB, o None si no lo es.
+
+    Pillow abre estos TIFF pero los baja a 8 bits sin avisar, y ahi se
+    pierde justo el margen que hace util un archivo de 16 bits (el resultado
+    de una fusion HDR, por ejemplo, que se revela estirando mucho sombras y
+    luces). OpenCV si los lee enteros.
+    """
+    if Path(path).suffix.lower() not in (".tif", ".tiff"):
+        return None
+    try:
+        bgr = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    except Exception:
+        return None
+    if bgr is None or bgr.dtype != np.uint16 or bgr.ndim != 3:
+        return None
+    if bgr.shape[2] == 4:
+        bgr = bgr[:, :, :3]
+    elif bgr.shape[2] != 3:
+        return None
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
 def _load_rgb(path, half_size):
-    """Devuelve uint8 RGB."""
+    """Devuelve uint8 RGB (o uint16 en RAW y TIFF de 16 bits)."""
     path = Path(path)
     if is_raw(path):
         with rawpy.imread(str(path)) as raw:
             return raw.postprocess(use_camera_wb=True, half_size=half_size,
                                    output_bps=16, no_auto_bright=False,
                                    highlight_mode=rawpy.HighlightMode.Blend)
+    tiff16 = _load_tiff16(path)
+    if tiff16 is not None:
+        return tiff16
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)
         # Aplicar perfil ICC embebido (como hace Windows). Las fotos de

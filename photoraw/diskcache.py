@@ -7,6 +7,7 @@ foto cambia el cache se invalida solo. El tamano total se limita borrando
 lo menos usado (LRU).
 """
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -16,8 +17,66 @@ import numpy as np
 from photoraw import loader
 
 CACHE_DIR = Path.home() / ".photoraw" / "cache"
-MAX_BYTES = 4 * 1024 ** 3  # 4 GB
+LIMIT_FILE = Path.home() / ".photoraw" / "cache_limit.json"
+DEFAULT_MAX_GB = 4
 THUMB_SIDE = 320
+# GB "de los que pone en el disco duro" (1000, no 1024), para que el tope que
+# eliges en la ventana sea el numero que luego se te ensena
+GB = 1_000_000_000
+
+# Categorias del cache, por extension. Sirven para el desglose que se ensena
+# en la ventana de Modelos de IA.
+KINDS = {
+    ".jpg": "miniaturas de la tira",
+    ".npy": "fotos ya decodificadas",
+    ".npz": "trabajos de IA y revelados",
+}
+
+
+def _load_limit():
+    try:
+        gb = float(json.loads(LIMIT_FILE.read_text("utf-8"))["max_gb"])
+        return max(int(gb * GB), 256 * 1_000_000)   # nunca menos de 256 MB
+    except Exception:
+        return DEFAULT_MAX_GB * GB
+
+
+MAX_BYTES = _load_limit()
+
+
+def limit_gb():
+    """Tope del cache en GB."""
+    return MAX_BYTES / GB
+
+
+def set_limit_gb(gb):
+    """Cambia el tope y, si el cache ya lo pasa, recorta ya mismo."""
+    global MAX_BYTES
+    MAX_BYTES = max(int(float(gb) * GB), 256 * 1_000_000)
+    try:
+        LIMIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LIMIT_FILE.write_text(json.dumps({"max_gb": float(gb)}), encoding="utf-8")
+    except Exception:
+        pass
+    _evict_if_needed()
+
+
+def stats():
+    """(bytes usados, tope, {categoria: (n archivos, bytes)}) para la interfaz."""
+    por_tipo = {}
+    total = 0
+    try:
+        for f in CACHE_DIR.iterdir():
+            if not f.is_file():
+                continue
+            size = f.stat().st_size
+            total += size
+            nombre = KINDS.get(f.suffix.lower(), "Otros")
+            n, b = por_tipo.get(nombre, (0, 0))
+            por_tipo[nombre] = (n + 1, b + size)
+    except OSError:
+        pass
+    return total, MAX_BYTES, por_tipo
 
 
 def _entry(path, kind, ext):

@@ -117,12 +117,19 @@ def auto_tone(img, target=0.42):
     med = float(np.median(_luminance(small)))
     if med >= target:
         return img
-    deficit = np.clip((target - med) / target, 0.0, 1.0)
+    # `float(...)` a proposito: np.clip devuelve un np.float64 y multiplicar
+    # la foto (float32) por un escalar float64 la asciende ENTERA a float64.
+    # Asi salia de aqui, y el resto del revelado seguia en float64: el doble
+    # de memoria y unas 3,5 veces mas lento por operacion, sin ninguna
+    # ganancia de calidad visible (la foto acaba en 8 bits por canal)
+    deficit = float(np.clip((target - med) / target, 0.0, 1.0))
     weight = deficit ** 1.5
     if weight < 0.01:
         return img
     mapped = tone_mapping(img, key=0.35)
-    return img * (1.0 - weight) + mapped * weight
+    mapped *= weight                    # mapped es nuestro: se puede pisar
+    mapped += img * (1.0 - weight)
+    return mapped
 
 
 def tone_mapping(img, key=0.18, saturation=1.0):
@@ -139,23 +146,29 @@ def tone_mapping(img, key=0.18, saturation=1.0):
     Returns:
         float32 RGB 0..1 con tonos mapeados
     """
-    # Calcular luminancia
+    # Calcular luminancia. Se deja tal cual (una copia de la foto entera y
+    # luego sumar el eje del color) a proposito: hacerlo con _luminance suma
+    # los tres canales en otro orden y en float32 eso mueve el ultimo bit —
+    # movia 1/255 en un pixel de cada 100.000, invisible pero distinto
     lum = img * np.array([0.2126, 0.7152, 0.0722], np.float32)
     lum = lum.sum(axis=-1)
-    
+
     # Luminancia promedio geometrico (mas preciso que aritmetico)
     log_lum = np.log(lum + 1e-6)
     log_avg = np.exp(log_lum.mean())
-    
+    del lum, log_lum
+
     # Factor de escala basado en el key value
     scale = key / (log_avg + 1e-6)
-    
+
     # Aplicar escala
     img_scaled = img * scale
-    
+
     # Mapeo tonal: division con compresion suave
     # Formula: L_out = L_in / (1 + L_in) - comparte highlights
-    img_mapped = img_scaled / (1.0 + img_scaled)
+    den = img_scaled + 1.0
+    img_mapped = np.divide(img_scaled, den, out=img_scaled)
+    del den
     
     # Control de saturacion: mezclar con luminancia
     if saturation != 1.0:
@@ -163,7 +176,7 @@ def tone_mapping(img, key=0.18, saturation=1.0):
         lum_new = lum_new.sum(axis=-1, keepdims=True)
         img_mapped = lum_new + (img_mapped - lum_new) * saturation
     
-    return np.clip(img_mapped, 0.0, 1.0)
+    return np.clip(img_mapped, 0.0, 1.0, out=img_mapped)
 
 
 def adaptive_contrast(img, clip_limit=2.0, grid_size=8):
@@ -496,6 +509,21 @@ def _build_channel_luts(e):
 
 def _luminance(img):
     return img[..., 0] * 0.2126 + img[..., 1] * 0.7152 + img[..., 2] * 0.0722
+
+
+def _lut_index(img):
+    """Indices uint16 para leer una tabla (LUT) de LUT_N entradas.
+
+    Escrito paso a paso y reutilizando el mismo array en vez de
+    `(np.clip(img, 0, 1) * (LUT_N - 1) + 0.5).astype(np.uint16)`: esa version
+    en una linea deja cuatro copias intermedias de la foto entera por el
+    camino, y en una vista previa de 3 megapixeles cada copia son 37 MB que
+    hay que reservar, llenar y tirar. El resultado es el mismo numero.
+    """
+    x = np.clip(img, 0.0, 1.0)
+    x *= (LUT_N - 1)
+    x += 0.5
+    return x.astype(np.uint16)
 
 
 def _sharpen_mask(img, masking):
@@ -838,8 +866,7 @@ def _apply_profile(img, name):
     if style is not None:
         slut = pchip_lut(style, LUT_N).astype(np.float32)
         lut = slut[(lut * (LUT_N - 1) + 0.5).astype(np.uint16)]
-    idx = (np.clip(img, 0.0, 1.0) * (LUT_N - 1) + 0.5).astype(np.uint16)
-    img = lut[idx]
+    img = lut[_lut_index(img)]
 
     if name == "bw":
         lum = np.clip(_luminance(img), 0.0, 1.0).astype(np.float32)
@@ -850,7 +877,11 @@ def _apply_profile(img, name):
         lum = _luminance(img)[..., None]
         rango = np.clip((img.max(-1) - img.min(-1)) * 1.5, 0.0, 1.0)
         factor = 1.0 + (sat - 1.0) * (1.0 - rango)[..., None]
-        img = np.clip(lum + (img - lum) * factor, 0.0, 1.0)
+        # img viene de leer la tabla, asi que es nuestro y se puede pisar
+        img -= lum
+        img *= factor
+        img += lum
+        np.clip(img, 0.0, 1.0, out=img)
     return img
 
 
@@ -889,7 +920,12 @@ def _apply_calibration(img, e):
 
 def _smoothstep(x):
     t = np.clip(x, 0.0, 1.0)
-    return t * t * (3.0 - 2.0 * t)
+    # (t*t) * (3 - 2t), en ese orden y reusando arrays: la cuenta es la misma
+    out = t * t
+    t *= -2.0
+    t += 3.0
+    out *= t
+    return out
 
 
 def _apply_hsl(img, e):
@@ -902,8 +938,8 @@ def _apply_hsl(img, e):
     if not (has_mix or has_pc):
         return img
 
-    hsv = cv2.cvtColor(np.clip(img, 0.0, 1.0).astype(np.float32),
-                       cv2.COLOR_RGB2HSV)
+    # el clip ya devuelve float32: un astype aqui solo duplicaria la foto
+    hsv = cv2.cvtColor(np.clip(img, 0.0, 1.0), cv2.COLOR_RGB2HSV)
     h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
     # los grises y los pixeles casi negros no tienen matiz fiable: se protegen
     w_base = _smoothstep(s / 0.18) * _smoothstep(v / 0.08)
@@ -983,12 +1019,10 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         whites=e["whites"] / 100.0,        # -1..1
         blacks=e["blacks"] / 100.0,        # -1..1
     )
-    img = np.clip(img, 0.0, 1.0)
-    idx = (img * (LUT_N - 1) + 0.5).astype(np.uint16)
-    for c in range(3):
-        img[..., c] = tone_lut[idx[..., c]]
-
-    img = np.clip(img, 0.0, 1.0)
+    # la misma curva para los tres canales: se lee la tabla de una pasada en
+    # vez de canal a canal (leer `idx[..., c]` va salteado por la memoria)
+    img = tone_lut[_lut_index(img)]
+    np.clip(img, 0.0, 1.0, out=img)
 
     # Borrar neblina (dehaze)
     dh = e["dehaze"] / 100.0
@@ -1016,10 +1050,10 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
     # Curva de tonos (parametrica + puntos + por canal), por indexado directo
     luts = _build_channel_luts(e)
     if luts is not None:
-        img = np.clip(img, 0.0, 1.0)
-        idx = (img * (LUT_N - 1) + 0.5).astype(np.uint16)
+        idx = _lut_index(img)
         for c in range(3):
             img[..., c] = luts[c][idx[..., c]]
+        del idx
 
     # Saturacion y vitalidad
     sat = e["saturation"] / 100.0
@@ -1031,7 +1065,11 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
             current = img.max(-1) - img.min(-1)
             factor = factor + vib * (1.0 - np.clip(current * 2.0, 0.0, 1.0))
             factor = factor[..., None]
-        img = np.clip(lum + (img - lum) * factor, 0.0, 1.0)
+        # lum + (img - lum) * factor, hecho encima del propio img
+        img -= lum
+        img *= factor
+        img += lum
+        np.clip(img, 0.0, 1.0, out=img)
 
     # Mezclador HSL y color de punto
     img = _apply_hsl(img, e)
@@ -1079,12 +1117,17 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         detail = lum - blur
         protect = np.clip(1.0 - (2.0 * lum - 1.0) ** 2, 0.0, 1.0)
         boost = (e["clarity"] / 100.0 * 0.6) * detail * protect
-        img = np.clip(img + boost[..., None], 0.0, 1.0)
+        img += boost[..., None]
+        np.clip(img, 0.0, 1.0, out=img)
 
     # Textura (detalle de frecuencia media; negativo suaviza)
     if e["texture"]:
         blur = cv2.GaussianBlur(img, (0, 0), 4.0)
-        img = np.clip(img + (img - blur) * (e["texture"] / 100.0 * 0.9), 0.0, 1.0)
+        # img + (img - blur) * k, reusando blur como cuaderno de notas
+        np.subtract(img, blur, out=blur)
+        blur *= (e["texture"] / 100.0 * 0.9)
+        img += blur
+        np.clip(img, 0.0, 1.0, out=img)
 
     # Enfoque: cantidad / radio / detalle / mascara
     if e["sharp_amount"]:
@@ -1100,7 +1143,9 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         if e["sharp_masking"]:
             mask = _sharpen_mask(img, e["sharp_masking"] / 100.0)
             high *= mask[..., None]
-        img = np.clip(img + high * amount, 0.0, 1.0)
+        high *= amount
+        img += high
+        np.clip(img, 0.0, 1.0, out=img)
 
     # Grano de pelicula: monocromatico, mas fuerte en tonos medios (como el
     # grano real de negativo), deterministico para que no "hierva" al editar
@@ -1120,7 +1165,13 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         noise = cv2.resize(noise, (w, h), interpolation=cv2.INTER_LINEAR)
         lum = _luminance(img)
         mid = np.clip(4.0 * lum * (1.0 - lum), 0.15, 1.0)
-        img = np.clip(img + (e["grain_amount"] / 100.0 * 0.12)
-                      * noise[..., None] * mid[..., None], 0.0, 1.0)
+        # mismo orden que antes —(k * noise) * mid— para no mover ni un bit:
+        # en float32 multiplicar en otro orden puede cambiar el ultimo decimal
+        noise *= (e["grain_amount"] / 100.0 * 0.12)
+        noise *= mid
+        img += noise[..., None]
+        np.clip(img, 0.0, 1.0, out=img)
 
-    return (img * 255.0 + 0.5).astype(np.uint8)
+    img *= 255.0
+    img += 0.5
+    return img.astype(np.uint8)

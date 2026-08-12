@@ -16,14 +16,14 @@ from PySide6.QtWidgets import (
     QProgressDialog, QAbstractItemView, QGroupBox, QSizePolicy, QComboBox,
     QFrame, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QGraphicsEllipseItem, QGraphicsItem, QProgressBar, QStackedWidget,
-    QCheckBox, QMenu,
+    QCheckBox, QMenu, QDialog,
 )
 from PySide6.QtGui import QPen
 
 import qtawesome as qta
 
 from photoraw import (ai, diskcache, engine, face_parse, faces, generative,
-                      hardware, heal, loader, masks_ai, presets, upscale)
+                      hardware, hdr, heal, loader, masks_ai, presets, upscale)
 from photoraw.edits import EditStore
 from photoraw.ui.curve_widget import CurveWidget, HistogramWidget
 
@@ -225,10 +225,25 @@ QSplitter::handle { background: #1b1b1b; }
 
 
 class NoWheelSlider(QSlider):
-    """La rueda del raton no cambia el valor: se deja pasar al scroll del panel."""
+    """Deslizador de ajuste.
+
+    - La rueda del raton no lo mueve: se deja pasar al scroll del panel.
+    - Doble clic = vuelve a su valor de fabrica, como en Lightroom. Subes
+      contraste a 23, ves que es demasiado, doble clic y a 0 sin tener que
+      afinar el arrastre ni acordarte de cuanto habia.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.default_value = 0
+        self.setToolTip("Doble clic para restablecer")
 
     def wheelEvent(self, event):
         event.ignore()
+
+    def mouseDoubleClickEvent(self, event):
+        self.setValue(self.default_value)   # valueChanged aplica el cambio
+        event.accept()
 
 
 class NoWheelCombo(QComboBox):
@@ -423,10 +438,17 @@ class DecodeJob(QRunnable):
 
 
 class RenderJob(QRunnable):
-    """Aplica los ajustes a la vista previa."""
+    """Aplica los ajustes a la vista previa.
+
+    Con `cache_tag` el revelado terminado se guarda en el cache de disco y se
+    reutiliza: volver a una foto ya revelada pasa de segundos a un pestaneo.
+    El tag lo pone la ventana y lleva TODO lo que cambia el resultado (los
+    ajustes y que ingredientes de IA entran); la huella del `base` se calcula
+    aqui, en el hilo de trabajo, porque son unas decimas sobre 37 MB.
+    """
 
     def __init__(self, path, base, edits, gen, signals, denoised=None,
-                 faced=None, ai_masks=None):
+                 faced=None, ai_masks=None, cache_tag=None):
         super().__init__()
         self.path = path
         self.base = base
@@ -436,9 +458,19 @@ class RenderJob(QRunnable):
         self.denoised = denoised
         self.faced = faced
         self.ai_masks = ai_masks
+        self.cache_tag = cache_tag
 
     def run(self):
         try:
+            key = None
+            if self.cache_tag:
+                key = "rend1-" + diskcache.result_key(self.base, self.cache_tag)
+                hit = diskcache.load_result(self.path, key)
+                if hit is not None:
+                    out = np.ascontiguousarray(hit[0])
+                    self.signals.preview_ready.emit(
+                        self.path, self.gen, np_to_qimage(out), out)
+                    return
             base = self.base
             amount = self.edits.get("ai_denoise", 0.0) / 100.0
             if amount > 0 and self.denoised is not None and self.denoised.shape == base.shape:
@@ -450,6 +482,8 @@ class RenderJob(QRunnable):
             out = engine.apply_edits(base, self.edits, ai_masks=self.ai_masks,
                                      denoised=self.denoised, faced=self.faced,
                                      is_raw=loader.is_raw(self.path))
+            if key:
+                diskcache.save_result(self.path, key, out)
             self.signals.preview_ready.emit(self.path, self.gen, np_to_qimage(out), out)
         finally:
             # avisa siempre (incluso si algo falla) para que la fila india
@@ -690,7 +724,10 @@ class AIFaceJob(AIJob):
         key = f"fac-{faces.current_model()}-" + diskcache.result_key(self.base)
         hit = diskcache.load_result(self.path, key)
         if hit is not None:
-            self.window.on_ai_faces_done(str(self.path), hit[0], hit[1])
+            arr, n = hit
+            # meta=0 es el "aqui no hay caras" guardado (ver mas abajo)
+            self.window.on_ai_faces_done(str(self.path),
+                                         arr if n else None, n)
             return
         try:
             self.status("IA rostros: procesando…")
@@ -698,6 +735,12 @@ class AIFaceJob(AIJob):
             if n == 0:
                 result = None
                 self.status("IA rostros: no se detectaron caras")
+                # Guardar tambien que NO hay caras, con un array de mentira y
+                # meta=0. Si no, una foto sin gente que tenga el ajuste de
+                # rostros guardado vuelve a buscarlas en cada apertura y no
+                # apunta nunca el resultado.
+                diskcache.save_result(self.path, key,
+                                      np.zeros((1, 1, 3), np.uint8), meta=0)
             else:
                 diskcache.save_result(self.path, key, result, meta=n)
         except ai.Cancelled:
@@ -1430,12 +1473,21 @@ class MainWindow(QMainWindow):
         self.show_mask = False            # vista de la mascara de enfoque (Alt)
         self.crop_mode = False            # pestana Recorte activa
         self.fit_next = True              # ajustar zoom al cambiar de foto
+        # path -> miniatura del revelado, para las fotos que tienen edicion.
+        # La de la camara vive en thumb_pixmaps y no se pisa nunca
+        self.edited_thumbs = {}
         self.base_cache = OrderedDict()   # path -> float32 array
+        # path -> revelado ya terminado (huella, ingredientes, QImage, array):
+        # volver a una foto que no ha cambiado se pinta sin calcular nada
+        self.render_cache = OrderedDict()
+        self._cacheable_fp = None         # ingredientes del render en marcha
+        self._cacheable_gen = None        # su `gen`, si es guardable
         self.ai_cache = OrderedDict()     # path -> vista previa sin ruido (IA)
         self.ai_running = set()
         self.ai_pending_path = None       # foto esperando a que baje el modelo
         self.face_cache = OrderedDict()   # path -> vista previa con rostros IA
         self.face_running = set()
+        self.no_faces = set()             # fotos donde ya se busco y no hay caras
         self.healed = set()               # fotos con trazos ya aplicados a su base
         self.heal_running = set()
         self.heal_undo = {}   # path -> [(n trazos, n borrados IA, base previa f16)]
@@ -1897,6 +1949,7 @@ class MainWindow(QMainWindow):
         mask_brush_size = NoWheelSlider(Qt.Horizontal)
         mask_brush_size.setRange(5, 120)
         mask_brush_size.setValue(30)
+        mask_brush_size.default_value = 30
         mask_brush_size.valueChanged.connect(
             lambda val: self.preview.set_brush_radius(val))
         self.mask_brush_erase = QPushButton(icon("mdi6.eraser"), "Quitar")
@@ -1950,6 +2003,7 @@ class MainWindow(QMainWindow):
         self.mask_feather = NoWheelSlider(Qt.Horizontal)
         self.mask_feather.setRange(2, 100)
         self.mask_feather.setValue(50)
+        self.mask_feather.default_value = 50
         self.mask_feather.setToolTip(
             "Suavidad del borde del degradado radial")
         self.mask_feather.valueChanged.connect(self.on_mask_feather)
@@ -2141,6 +2195,10 @@ class MainWindow(QMainWindow):
             slider = NoWheelSlider(Qt.Horizontal)
             slider.setRange(lo, hi)
             slider.setValue(0)
+            # el doble clic devuelve el ajuste a fabrica, que no siempre es
+            # cero (enfoque: radio 1,0 y detalle 25)
+            slider.default_value = int(round(
+                float(engine.DEFAULT_EDITS.get(key, 0) or 0) * scale))
             val = QLabel("0")
             val.setFixedWidth(42)
             val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -2177,6 +2235,18 @@ class MainWindow(QMainWindow):
         a_export.setShortcut(QKeySequence("Ctrl+E"))
         a_export.triggered.connect(self.export_selected)
         tb.addAction(a_export)
+
+        a_hdr = QAction(icon("mdi6.hdr"), "Fusionar HDR", self)
+        a_hdr.setShortcut(QKeySequence("Ctrl+H"))
+        a_hdr.setToolTip(
+            "Junta las tomas de un bracketing (la oscura, la normal y la\n"
+            "clara) en una sola foto con detalle en todo: cielo sin quemar\n"
+            "y sombras abiertas.\n\n"
+            "Selecciona las tomas en la tira y pulsa aquí. Si no seleccionas\n"
+            "nada, PhotoRAW busca solo las tandas de la carpeta.\n"
+            "Atajo: Ctrl+H.")
+        a_hdr.triggered.connect(self.merge_hdr)
+        tb.addAction(a_hdr)
 
         tb.addSeparator()
 
@@ -2278,8 +2348,11 @@ class MainWindow(QMainWindow):
         self.store = EditStore(self.folder)
         self.current_path = None
         self.base_cache.clear()
+        self.render_cache.clear()
+        self.no_faces.clear()
         self.decoding.clear()
         self.thumb_pixmaps.clear()
+        self.edited_thumbs.clear()
         self.film.clear()
         self.preview.clear_photo("Cargando miniaturas…")
 
@@ -2331,7 +2404,10 @@ class MainWindow(QMainWindow):
             row = self.film.row(item)
             self.film.takeItem(row)
             self.thumb_pixmaps.pop(path, None)
+            self.edited_thumbs.pop(path, None)
             self.base_cache.pop(path, None)
+            self.render_cache.pop(path, None)
+            self.no_faces.discard(path)
             self.ai_cache.pop(path, None)
             self.face_cache.pop(path, None)
             self.small_cache = {k: v for k, v in self.small_cache.items()
@@ -2362,6 +2438,12 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         menu = QMenu(self)
+        n = len(self.film.selectedItems())
+        hdr_action = menu.addAction(
+            icon("mdi6.hdr"),
+            f"Fusionar HDR ({n} tomas)" if n > 1 else "Fusionar HDR…")
+        hdr_action.triggered.connect(self.merge_hdr)
+        menu.addSeparator()
         del_action = menu.addAction(icon("mdi6.delete-outline"), "Eliminar")
         del_action.triggered.connect(self.delete_photos)
         menu.exec(self.film.viewport().mapToGlobal(pos))
@@ -2376,13 +2458,30 @@ class MainWindow(QMainWindow):
                 return item
         return None
 
-    def _update_film_icon(self, path, image=None):
+    def _update_film_icon(self, path, image=None, rendered=False):
         """Actualiza la miniatura de la tira; si la foto tiene edicion
-        guardada le pone la insignia del lapiz (como Lightroom)."""
+        guardada le pone la insignia del lapiz (como Lightroom).
+
+        Se guardan por separado la foto **tal cual la tomo la camara** (su
+        miniatura incrustada) y el revelado, y se ensena una u otra segun la
+        foto tenga edicion o no. Asi una tanda de bracketing se ve como es
+        —una oscura, una clara, una normal— en vez de igualarse en cuanto
+        abres cada toma: el revelado corrige la exposicion de cada foto por
+        su cuenta y borraba justo lo que las distingue. Guardarlas separadas
+        (y no sobreescribir) es lo que permite que al quitarle la edicion a
+        una foto su miniatura vuelva sola a la de la camara.
+        """
         if image is not None and not image.isNull():
-            self.thumb_pixmaps[path] = QPixmap.fromImage(image).scaled(
+            pm = QPixmap.fromImage(image).scaled(
                 150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        pm = self.thumb_pixmaps.get(path)
+            if rendered:
+                self.edited_thumbs[path] = pm
+            else:
+                self.thumb_pixmaps[path] = pm
+        editada = bool(self.store and self.store.get(path))
+        pm = self.edited_thumbs.get(path) if editada else None
+        if pm is None:
+            pm = self.thumb_pixmaps.get(path)
         item = self._film_item(path)
         if item is None or pm is None:
             return
@@ -2427,7 +2526,10 @@ class MainWindow(QMainWindow):
 
         self._refresh_mask_list()
         if path in self.base_cache:
-            self.request_render()
+            # Al abrir una foto se va directo a la calidad final: el borrador
+            # no se guarda, asi que pedirlo primero costaria medio segundo y
+            # otro tanto de espera antes de mirar el revelado ya guardado
+            self.request_render(final=True)
         elif path not in self.decoding:
             self.decoding.add(path)
             self.preview.clear_photo("Cargando foto…")
@@ -2449,7 +2551,7 @@ class MainWindow(QMainWindow):
         self._update_busy()
         if path == self.current_path:
             if path in self.base_cache:
-                self.request_render()
+                self.request_render(final=True)   # foto recien abierta
                 # Trazos del corrector pendientes: primero se aplican, y al
                 # terminar se relanza la IA guardada; si no hay, IA directa
                 strokes = self.current_edits.get("heal_strokes")
@@ -2492,11 +2594,60 @@ class MainWindow(QMainWindow):
         self.small_cache[key] = (arr, small)
         return small
 
+    # ---------- cache del revelado terminado ----------
+
+    RENDER_CACHE_MAX = 6      # fotos con su revelado listo en memoria
+
+    def _render_tag(self, edits, den, fac, masks):
+        """Todo lo que cambia un revelado, menos la foto de partida.
+
+        Los ingredientes de IA no hace falta resumirlos por su contenido: son
+        deterministas a partir del `base` (que ya entra en la clave por su
+        propia huella) y del modelo, asi que basta con apuntar cuales entran y
+        con que modelo de rostros.
+        """
+        return json.dumps({
+            "edits": edits,
+            "den": den is not None,
+            "fac": faces.current_model() if fac is not None else None,
+            "masks": sorted(masks) if masks else None,
+        }, sort_keys=True, default=str)
+
+    def _render_from_memory(self, path, tag, base, den, fac, masks):
+        """Revelado ya hecho de esta foto, si sigue valiendo.
+
+        Los arrays se comparan por identidad, como en `_small`: si el objeto
+        es el mismo, su contenido tambien. Guardar la referencia los mantiene
+        vivos, asi que no hay riesgo de acertar con uno que ya no existe.
+        """
+        hit = self.render_cache.get(path)
+        if hit is None:
+            return None
+        h_tag, h_base, h_den, h_fac, h_masks, image, arr = hit
+        if (h_tag == tag and h_base is base and h_den is den
+                and h_fac is fac and h_masks is masks):
+            self.render_cache.move_to_end(path)
+            return image, arr
+        return None
+
+    def _store_render(self, path, image, arr):
+        """Guarda en memoria el revelado que se acaba de pintar."""
+        fp = getattr(self, "_cacheable_fp", None)
+        if not fp or fp[0] != path:
+            return
+        _p, tag, base, den, fac, masks = fp
+        self.render_cache[path] = (tag, base, den, fac, masks, image, arr)
+        self.render_cache.move_to_end(path)
+        while len(self.render_cache) > self.RENDER_CACHE_MAX:
+            self.render_cache.popitem(last=False)
+
     def request_render(self, final=False):
         path = self.current_path
         if not path or path not in self.base_cache:
             return
         self.gen += 1
+        self._cacheable_fp = None
+        self._cacheable_gen = None
         if self.a_original.isChecked():
             # vista "antes": la foto tal cual, sin ajustes ni IA ni recorte
             self._start_render(RenderJob(path, self.base_cache[path], {},
@@ -2526,9 +2677,27 @@ class MainWindow(QMainWindow):
             self.final_timer.start()
         else:
             self.final_timer.stop()
+
+        # Solo se guarda el revelado de calidad y "normal": los borradores no
+        # valen para volver a la foto, y las pasadas especiales (ver la
+        # mascara, el marco de recorte, el corrector) llevan banderas `_...`
+        # que cambian la imagen y no son lo que se quiere conservar.
+        masks = self.mask_ai_cache.get(path)
+        cacheable = final and not any(k.startswith("_") for k in edits)
+        tag = None
+        if cacheable:
+            tag = self._render_tag(edits, den, fac, masks)
+            hit = self._render_from_memory(path, tag, base, den, fac, masks)
+            if hit is not None:
+                # ya revelada y nada ha cambiado: se pinta y no se calcula nada
+                self.on_preview_ready(path, self.gen, hit[0], hit[1])
+                return
+            self._cacheable_fp = (path, tag, base, den, fac, masks)
+            self._cacheable_gen = self.gen
+
         self._start_render(RenderJob(path, base, edits, self.gen, self.signals,
-                                     denoised=den, faced=fac,
-                                     ai_masks=self.mask_ai_cache.get(path)))
+                                     denoised=den, faced=fac, ai_masks=masks,
+                                     cache_tag=tag))
 
     def _start_render(self, job):
         """Fila india: si ya hay un render en marcha, este espera su turno.
@@ -3061,6 +3230,7 @@ class MainWindow(QMainWindow):
             self.run_ai_denoise(path=path)
         if ((self.current_edits.get("ai_face") or need_fac)
                 and path not in self.face_cache
+                and path not in self.no_faces
                 and path not in self.face_running
                 and faces.models_available()):
             if not self.current_edits.get("ai_face"):
@@ -3119,6 +3289,10 @@ class MainWindow(QMainWindow):
             self.face_cache[path] = result
             while len(self.face_cache) > 4:
                 self.face_cache.popitem(last=False)
+        elif n_faces == 0:
+            # sin caras: se anota para no volver a buscarlas cada vez que se
+            # abre esta foto (el ajuste de rostros sigue guardado en ella)
+            self.no_faces.add(path)
         self._last_face_count = n_faces
         self.signals.face_ready.emit(path)
 
@@ -3156,6 +3330,10 @@ class MainWindow(QMainWindow):
 
     def on_preview_ready(self, path, gen, image, arr=None):
         if gen == self.gen and path == self.current_path:
+            # Mismo `gen` = nada ha cambiado desde que se pidio, asi que este
+            # revelado sigue siendo el que toca y se puede guardar
+            if self._cacheable_gen == gen and arr is not None:
+                self._store_render(path, image, arr)
             self.preview.set_photo(QPixmap.fromImage(image), fit=self.fit_next)
             self.fit_next = False
             if arr is not None:
@@ -3164,7 +3342,9 @@ class MainWindow(QMainWindow):
                 self.preview.set_crop_rect(self.current_edits.get("crop") or None)
             elif not (self.show_mask or self.a_original.isChecked()
                       or self.a_brush.isChecked()):
-                self._update_film_icon(path, image)
+                # se guarda como miniatura del revelado; _update_film_icon
+                # decide si toca ensenarla o dejar la de la camara
+                self._update_film_icon(path, image, rendered=True)
             if self.panel_stack.currentIndex() == 2:
                 self._throttle_overlay()
 
@@ -3949,6 +4129,8 @@ class MainWindow(QMainWindow):
             if had_strokes:
                 # la base en cache ya tenia el borrado aplicado: recargar
                 self.base_cache.pop(path, None)
+                self.render_cache.pop(path, None)
+                self.no_faces.discard(path)
                 self.ai_cache.pop(path, None)
                 self.face_cache.pop(path, None)
                 self.healed.discard(path)
@@ -4020,6 +4202,156 @@ class MainWindow(QMainWindow):
                 == QMessageBox.Yes:
             presets.delete_preset(item.text())
             self.refresh_presets()
+
+    # ---------- fusion HDR (bracketing) ----------
+
+    def merge_hdr(self):
+        """Junta las tomas de un bracketing en una sola foto.
+
+        Con varias fotos seleccionadas en la tira, esas son la tanda. Sin
+        seleccion (o con una sola), se buscan las tandas de la carpeta.
+        """
+        from photoraw.ui.hdr_dialog import HdrDialog
+
+        if not self.folder:
+            QMessageBox.information(self, APP_NAME,
+                                    "Abre primero una carpeta de fotos.")
+            return
+
+        paths = [Path(i.data(Qt.UserRole)) for i in self.film.selectedItems()]
+        auto = len(paths) < 2
+        if auto:
+            groups = self._detect_hdr_groups()
+            if not groups:
+                QMessageBox.information(
+                    self, APP_NAME,
+                    "No he encontrado ninguna tanda de bracketing en esta "
+                    "carpeta.\n\nUna tanda son varias fotos disparadas "
+                    "seguidas con exposiciones distintas. Si sabes cuáles "
+                    "son, selecciónalas en la tira (Ctrl+clic) y vuelve a "
+                    "pulsar Fusionar HDR.")
+                return
+        else:
+            groups = [paths]
+
+        dlg = HdrDialog(groups, self, auto_detected=auto)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._run_hdr_merge(dlg.groups_to_merge, dlg.params)
+
+    def _detect_hdr_groups(self):
+        """Busca tandas de bracketing entre las fotos de la tira."""
+        files = [Path(self.film.item(i).data(Qt.UserRole))
+                 for i in range(self.film.count())]
+        # los HDR ya fusionados no son material de partida
+        files = [f for f in files if not f.stem.endswith(hdr.SUFFIX)]
+        progress = QProgressDialog("Buscando tandas de bracketing…", None,
+                                   0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(400)
+        try:
+            return hdr.detect_groups(
+                files, progress_cb=lambda p: (progress.setValue(int(p * 100)),
+                                              QApplication.processEvents()))
+        except Exception as exc:
+            self.statusBar().showMessage(f"No se pudo buscar el bracketing: {exc}")
+            return []
+        finally:
+            progress.close()
+
+    def _run_hdr_merge(self, groups, params):
+        """Fusiona las tandas a resolucion completa y las mete en la tira."""
+        progress = QProgressDialog("Fusionando…", "Cancelar", 0, len(groups), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        done, reduced, errors, sin_exif = [], [], [], []
+        for i, group in enumerate(groups):
+            if progress.wasCanceled():
+                break
+            name = hdr.describe_group(group)
+            # se pidio HDR real pero a estas tomas les falta el dato de
+            # exposicion: se fusionan con el metodo natural (lo hace fuse_paths)
+            if params.get("method") == hdr.HDR and hdr.exposures(group) is None:
+                sin_exif.append(name)
+            progress.setValue(i)
+            progress.setLabelText(f"Fusionando {name}… (puede tardar un rato)")
+            QApplication.processEvents()
+            try:
+                out, was_reduced = self._fuse_full(group, params, progress, name)
+                dest = hdr.save(out, hdr.output_path(group, self.folder))
+                del out
+                done.append(dest)
+                if was_reduced:
+                    reduced.append(dest.name)
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+        progress.setValue(len(groups))
+
+        for dest in done:
+            self._add_photo_to_film(dest)
+        if done:
+            self.pool.start(ThumbJob(done, self.signals, self.thumb_cancel))
+            item = self._film_item(str(done[-1]))
+            if item is not None:
+                self.film.setCurrentItem(item)   # abre el HDR recien hecho
+            self.statusBar().showMessage(
+                f"{len(done)} foto(s) HDR creada(s) en {self.folder}")
+
+        msg = []
+        if done:
+            msg.append("HDR creado(s):\n" + "\n".join(f"• {d.name}" for d in done))
+        if reduced:
+            msg.append("A media resolución por falta de memoria:\n"
+                       + "\n".join(f"• {n}" for n in reduced))
+        if sin_exif:
+            msg.append("Fusionadas con el método natural porque no traen los "
+                       "datos de exposición en el EXIF:\n"
+                       + "\n".join(f"• {n}" for n in sin_exif))
+        if errors:
+            msg.append("No se pudieron fusionar:\n" + "\n".join(errors))
+        if msg:
+            QMessageBox.information(self, APP_NAME, "\n\n".join(msg))
+
+    def _fuse_full(self, group, params, progress, name):
+        """Fusiona una tanda a resolucion completa.
+
+        Tres RAW de muchos megapixeles a la vez son varios GB de pirámides
+        en memoria, asi que si no cabe se reintenta a media resolucion en vez
+        de dejar al usuario sin su HDR. Devuelve (imagen, se_redujo).
+        """
+        def report(p):
+            progress.setLabelText(
+                f"Leyendo las tomas de {name}… {int(p * 100)} %")
+            QApplication.processEvents()
+
+        try:
+            return hdr.fuse_paths(group, params, progress_cb=report), False
+        except (MemoryError, cv2.error):
+            progress.setLabelText(
+                f"{name}: no cabe en memoria, probando a media resolución…")
+            QApplication.processEvents()
+            return hdr.fuse_paths(group, params, half_size=True), True
+
+    def _add_photo_to_film(self, path):
+        """Mete una foto nueva en la tira, en su sitio segun el nombre."""
+        path = Path(path)
+        existing = self._film_item(str(path))
+        if existing is not None:
+            return existing
+        placeholder = QPixmap(150, 150)
+        placeholder.fill(Qt.darkGray)
+        item = QListWidgetItem(QIcon(placeholder), path.name)
+        item.setData(Qt.UserRole, str(path))
+        item.setSizeHint(QSize(165, 180))
+        row = self.film.count()
+        for i in range(self.film.count()):
+            other = Path(self.film.item(i).data(Qt.UserRole)).name.lower()
+            if other > path.name.lower():
+                row = i
+                break
+        self.film.insertItem(row, item)
+        return item
 
     # ---------- exportar ----------
 

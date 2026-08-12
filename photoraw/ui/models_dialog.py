@@ -7,11 +7,11 @@ a usar. La ventana se dibuja a partir de photoraw.models.AI_MODELS, asi que
 no hay que tocarla al anadir una IA nueva.
 """
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
-from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
                                QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
-from photoraw import hardware, models
+from photoraw import diskcache, hardware, models
 
 VERDE = "#5fbf6a"
 GRIS = "#8a8a8a"
@@ -103,6 +103,8 @@ class ModelsDialog(QDialog):
         scroll.setWidget(contenedor)
         raiz.addWidget(scroll, 1)
 
+        raiz.addWidget(self._caja_cache())
+
         pie = QHBoxLayout()
         self.btn_faltan = QPushButton("Descargar los que faltan")
         self.btn_faltan.clicked.connect(self._descargar_faltantes)
@@ -114,6 +116,119 @@ class ModelsDialog(QDialog):
         raiz.addLayout(pie)
 
         self.refrescar()
+
+    # ---------- cache en disco ----------
+
+    def _caja_cache(self):
+        """Cuanto ocupa el cache, con que tope y un boton para vaciarlo.
+
+        Va aqui porque es el sitio donde ya se gestiona el espacio en disco.
+        """
+        caja = QFrame()
+        caja.setFrameShape(QFrame.StyledPanel)
+        caja.setStyleSheet("QFrame { border: 1px solid #2a2a2a; border-radius: 4px; }")
+        col = QVBoxLayout(caja)
+        col.setContentsMargins(10, 8, 10, 8)
+        col.setSpacing(6)
+
+        fila = QHBoxLayout()
+        self.cache_titulo = QLabel()
+        self.cache_titulo.setStyleSheet("font-weight: 600; border: none;")
+        fila.addWidget(self.cache_titulo)
+        fila.addStretch(1)
+        fila.addWidget(self._etiqueta_plana("Tope:"))
+        self.cache_tope = QComboBox()
+        for gb in (1, 2, 4, 8, 16, 32):
+            self.cache_tope.addItem(f"{gb} GB", gb)
+        self.cache_tope.setToolTip(
+            "Cuando el caché pasa de este tamaño, PhotoRAW borra solo lo que\n"
+            "hace más tiempo que no usas. Más tope = más fotos que se abren\n"
+            "al instante; menos tope = menos espacio en el disco.")
+        self.cache_tope.currentIndexChanged.connect(self._cambiar_tope)
+        fila.addWidget(self.cache_tope)
+        self.btn_vaciar = QPushButton("Vaciar caché")
+        self.btn_vaciar.clicked.connect(self._vaciar_cache)
+        fila.addWidget(self.btn_vaciar)
+        col.addLayout(fila)
+
+        self.cache_barra = QProgressBar()
+        self.cache_barra.setTextVisible(False)
+        self.cache_barra.setFixedHeight(8)
+        col.addWidget(self.cache_barra)
+
+        self.cache_detalle = QLabel()
+        self.cache_detalle.setWordWrap(True)
+        self.cache_detalle.setStyleSheet(f"color: {GRIS}; border: none;")
+        col.addWidget(self.cache_detalle)
+        return caja
+
+    def _etiqueta_plana(self, texto):
+        lab = QLabel(texto)
+        lab.setStyleSheet(f"color: {GRIS}; border: none;")
+        return lab
+
+    def _refrescar_cache(self):
+        usado, tope, por_tipo = diskcache.stats()
+        self.cache_titulo.setText(
+            f"Caché en disco: {_mb(usado)} de {_mb(tope)}")
+        pct = int(min(usado / tope, 1.0) * 100) if tope else 0
+        self.cache_barra.setValue(pct)
+        color = VERDE if pct < 75 else AMBAR
+        self.cache_barra.setStyleSheet(
+            "QProgressBar { border: none; background: #2a2a2a; border-radius: 4px; }"
+            f"QProgressBar::chunk {{ background: {color}; border-radius: 4px; }}")
+        partes = [f"{n} {nombre} ({_mb(b)})"
+                  for nombre, (n, b) in sorted(por_tipo.items())]
+        self.cache_detalle.setText(
+            (", ".join(partes) + ". " if partes else "Vacío por ahora. ")
+            + "Aquí se guardan las fotos ya decodificadas y los revelados y "
+            "trabajos de IA terminados, para que abrir una foto que ya has "
+            "visto sea instantáneo. Se limpia sola: al pasar del tope borra "
+            "lo que hace más tiempo que no usas. "
+            "<b>Vaciarla no borra ninguna edición tuya</b> (esas viven junto a "
+            "las fotos), solo hace que la primera vez que vuelvas a abrir cada "
+            "foto tarde como el primer día.")
+        # el tope, sin disparar el aviso de cambio
+        self.cache_tope.blockSignals(True)
+        gb = diskcache.limit_gb()
+        idx = self.cache_tope.findData(int(round(gb)))
+        if idx < 0:
+            self.cache_tope.addItem(f"{gb:.0f} GB", int(round(gb)))
+            idx = self.cache_tope.count() - 1
+        self.cache_tope.setCurrentIndex(idx)
+        self.cache_tope.blockSignals(False)
+        self.btn_vaciar.setEnabled(usado > 0)
+
+    def _cambiar_tope(self, _idx):
+        gb = self.cache_tope.currentData()
+        if gb is None:
+            return
+        usado, _tope, _p = diskcache.stats()
+        if usado > gb * diskcache.GB:
+            if QMessageBox.question(
+                    self, "Caché",
+                    f"El caché ocupa ahora {_mb(usado)}. Al bajar el tope a "
+                    f"{gb} GB se borrará lo que hace más tiempo que no usas "
+                    f"hasta caber.\n\nNo se pierde ninguna edición tuya. "
+                    f"¿Seguir?") != QMessageBox.Yes:
+                self._refrescar_cache()   # deja el selector como estaba
+                return
+        diskcache.set_limit_gb(gb)
+        self._refrescar_cache()
+
+    def _vaciar_cache(self):
+        usado, _tope, _p = diskcache.stats()
+        if QMessageBox.question(
+                self, "Vaciar caché",
+                f"¿Vaciar el caché y liberar {_mb(usado)}?\n\n"
+                "No se pierde ninguna edición ni ningún ajuste: solo se tira "
+                "el trabajo ya calculado (fotos decodificadas, revelados y "
+                "resultados de IA), que se vuelve a hacer cuando haga falta. "
+                "Notarás que las fotos tardan más la primera vez.") \
+                != QMessageBox.Yes:
+            return
+        diskcache.clear()
+        self._refrescar_cache()
 
     # ---------- construccion ----------
 
@@ -181,6 +296,7 @@ class ModelsDialog(QDialog):
     # ---------- estado ----------
 
     def refrescar(self):
+        self._refrescar_cache()
         hechos, total, en_disco = models.summary()
         self.titulo.setText(f"{hechos} de {total} modelos instalados · "
                             f"{_mb(en_disco)} en disco")

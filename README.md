@@ -91,6 +91,68 @@ Los modelos se descargan una sola vez (al usarlos, o desde la ventana
 **Modelos de IA** de la barra) y quedan en `~/.photoraw/models`. Esa
 ventana es también donde ves cuánto ocupan y puedes borrar los que no uses.
 
+### Fusión HDR (bracketing)
+
+Si tu cámara dispara con **bracketing** (AEB) tienes varias tomas de la misma
+escena con exposiciones distintas: una oscura que conserva el cielo, una
+normal y una clara que abre las sombras. **Fusionar HDR** (`Ctrl+H`, o el
+menú del botón derecho en la tira) las junta en una sola foto con detalle en
+todas las zonas.
+
+- **Dos formas de elegir las tomas**: selecciónalas en la tira (`Ctrl+clic`)
+  y pulsa el botón; o no selecciones nada y PhotoRAW **busca solo** las
+  tandas de la carpeta. Para detectarlas usa dos señales a la vez: que se
+  dispararan seguidas (menos de 3 s, por la hora del EXIF con décimas, que
+  también se lee en los RAW porque un DNG es un TIFF por dentro) y que su
+  exposición cambie de verdad — así una ráfaga normal de tres fotos igual de
+  expuestas no se confunde con un bracketing.
+- **Vista previa en vivo**: las tomas se cargan una vez y ves el resultado al
+  momento mientras mueves los ajustes. Con varias tandas detectadas, marcas
+  las que quieras y se fusionan todas de una tacada.
+- **Alinear las tomas**, para el bracketing a pulso: corrige el movimiento de
+  la cámara, no lo que se movió dentro de la escena.
+
+#### Dos métodos, que no son variantes de lo mismo
+
+**Natural** (fusión de exposiciones, Mertens). No intenta saber cuánta luz
+había: mira las tomas zona por zona y se queda con la mejor de cada una. Es
+el «HDR natural» tipo Lightroom. No necesita EXIF y es rápido (~0,15 s en la
+vista previa). Tres ajustes: **Detalle** (cuánto pesa la textura al elegir de
+qué toma sale cada zona), **Color** y **Equilibrio** (cuánto tira al gris
+medio: más alto = más plano y seguro).
+
+**HDR real** (Debevec + mapeo tonal de Reinhard). Reconstruye cuánta luz
+recibió de verdad cada punto, deduciendo la curva de respuesta del sensor al
+comparar las tomas entre sí. El mapa de luz intermedio abarca **más de 13
+pasos** — imposible de enseñar en una pantalla —, así que después se comprime
+a algo visible. Conserva mejor las luces altas (**0 % quemado**, frente al
+0,7 % del natural) y da más margen de interpretación; pasarse con los mandos
+es lo que produce el típico aspecto artificial. Cuatro ajustes: **Brillo**,
+**Gamma** (subirla aclara los medios tonos), **Contraste local** (si manda el
+contraste de cada zona o el de la foto entera) y **Fidelidad de color**.
+
+Necesita el **tiempo de exposición y el ISO del EXIF**. Y ojo: no basta con
+el tiempo. Muchas cámaras (el iPhone entre ellas) hacen el bracketing subiendo
+también el ISO — en una tanda de ejemplo, del 1/59 al 1/17 hay 1,8 pasos de
+luz, pero contando el ISO (200 → 1000) son **4,1 de verdad**. Se calcula la
+exposición efectiva con tiempo, ISO y diafragma; con los tiempos a secas el
+HDR saldría mal calibrado. Si a una tanda le falta el dato, se fusiona con el
+método natural y se avisa.
+
+#### El resultado
+
+**Sale plano a propósito**: sin negros puros ni luces quemadas, con todo el
+margen recogido. Es materia prima — se guarda como **TIFF de 16 bits** junto a
+tus RAW (`IMG_0031_hdr.tif`), se abre en la tira y lo revelas como cualquier
+otra foto, partiendo de una base sin nada quemado.
+
+**No es un RAW**: ya lleva el color interpretado y el balance de blancos
+aplicado, mientras que un RAW guarda la medida cruda del sensor y deja esas
+decisiones abiertas. Lo que sí tiene son 16 bits (65.536 niveles por canal en
+vez de 256), y por eso aguanta que estires sombras y luces sin que aparezcan
+escalones en el cielo. Un bracketing de 12 MP tarda ~8 s en fusionarse y
+ocupa ~62 MB.
+
 ### Flujo de trabajo
 - **Original** (tecla `O`): antes/después instantáneo.
 - **Píldora de progreso** flotante sobre la foto: aro girando + estado de lo
@@ -115,18 +177,51 @@ ventana es también donde ves cuánto ocupan y puedes borrar los que no uses.
 - **Restaurar foto**: borra toda la edición (con confirmación).
 - **Corrector** (tecla `B`): pinta y suelta para borrar; Ctrl+Z deshace.
 - **Copiar/Pegar ajustes** (Ctrl+Shift+C/V) a varias fotos, **preajustes**
-  con nombre, **insignia de lápiz** en las miniaturas editadas y miniatura
-  viva que refleja tu edición.
+  con nombre e **insignia de lápiz** en las miniaturas editadas.
+- **Las miniaturas de la tira enseñan la foto tal cual la tomaste** mientras
+  no tenga edición, y pasan a reflejar tu revelado en cuanto la editas (y
+  vuelven solas a la de la cámara si la restauras). Antes se sustituían por
+  el revelado en cuanto abrías la foto, y eso igualaba las tomas: el revelado
+  corrige la exposición de cada foto por su cuenta (auto-brillo de LibRaw más
+  `auto_tone`), así que una tanda de bracketing pasaba de verse con **10,6×**
+  de diferencia entre la oscura y la clara a solo **2,2×** — justo lo que
+  necesitas comparar. En el diálogo de fusión HDR siempre se ven reales,
+  porque ahí las tomas se cargan a propósito sin auto-brillo.
 - **Exportar JPEG** (Ctrl+E) a tamaño original, 2× o 4× con IA.
+- **Fusionar HDR** (Ctrl+H): junta las tomas de un bracketing en una sola
+  foto (ver más arriba).
 
 ### Rendimiento
 - **Render en dos fases**: borrador reducido mientras arrastras un ajuste
   (~0,2 s) y calidad completa al soltar. El zoom no salta en el cambio.
+  Al **abrir** una foto se va directo a la calidad final: el borrador no se
+  guarda, así que pedirlo primero solo retrasaba la imagen buena.
+- **El revelado terminado también se guarda**, en memoria (las últimas 6
+  fotos) y en disco. Volver a una foto que no has tocado se pinta sin
+  calcular nada: **de 3,4 s a 0,13 s** en una foto con bastante edición
+  (ajustes tonales, curvas, HSL, máscara, enfoque, grano y dos IAs). La
+  clave incluye la foto, todos sus ajustes y qué ingredientes de IA entran,
+  así que en cuanto cambias algo se recalcula; los borradores y las pasadas
+  especiales (ver la máscara, el marco de recorte, el corrector) no se
+  guardan.
 - **Renders en fila india**: nunca corre más de un render a la vez; si
   mueves un ajuste mientras uno trabaja, solo se atiende el pedido más
   reciente. Así el procesador no se satura al arrastrar.
-- **Caché en disco** (`~/.photoraw/cache`, máx. 4 GB, se limpia solo): las
-  fotos ya visitadas cargan en ~30 ms y las miniaturas al instante.
+- **Caché en disco** (`~/.photoraw/cache`): las fotos ya visitadas cargan en
+  ~30 ms y las miniaturas al instante. El tope (4 GB de fábrica) se ajusta
+  desde la ventana **Modelos de IA**, que enseña cuánto ocupa y en qué, con
+  un botón para vaciarla. Se limpia sola: al pasar del tope borra lo que
+  hace más tiempo que no usas. Vaciarla no borra ninguna edición.
+- **Todo el revelado va en float32**. `auto_tone` devolvía float64 sin
+  querer (un escalar de numpy asciende el array entero), y de ahí en
+  adelante el revelado seguía al doble de memoria y ~3,5× más lento por
+  operación. Corregido: **−22 % en fotos oscuras** y −24 % en general, con
+  el mismo resultado (idéntico píxel a píxel en las fotos de prueba; en una
+  foto muy oscura puede bailar 1/255 en 2 píxeles de cada millón).
+- **Sin copias de más en el motor**: el patrón de leer una tabla de tonos
+  dejaba cuatro copias de la foto entera por el camino (37 MB cada una en
+  una vista previa de 3 MP); ahora las etapas trabajan sobre el mismo array.
+  El motor nunca toca la foto original, que está compartida con la caché.
 - **La IA también se guarda en disco**: ruido IA, rostros IA, corrector,
   borrado generativo y máscaras IA se calculan una sola vez por foto —
   reabrir una foto editada pasa de ~16 s a ~0,2 s.
@@ -147,6 +242,10 @@ móviles Android recientes), vía `pillow-heif`.
 A las fotos que traen perfil de color incrustado (los HEIC y JPG de iPhone
 vienen en Display P3) se les convierte el color a sRGB al cargarlas, igual
 que hace Windows; sin eso los rojos y verdes salen sobresaturados.
+
+Los **TIFF de 16 bits** se leen enteros, con sus 16 bits (Pillow los baja a 8
+sin avisar, así que pasan por OpenCV). Importa para los HDR que genera
+PhotoRAW, que se revelan estirando mucho sombras y luces.
 
 ## Pendiente / ideas futuras
 
@@ -173,6 +272,8 @@ photoraw/
   engine.py      pipeline de revelado (numpy/OpenCV): geometría → perfil →
                  calibración → tonal → curvas → HSL/color punto → máscaras
                  → detalle → grano
+  hdr.py         fusión de un bracketing: detección de tandas, alineado,
+                 fusión natural (Mertens) y HDR real (Debevec + Reinhard)
   edits.py       persistencia no destructiva (JSON por carpeta)
   presets.py     preajustes con nombre
   ai.py          SCUNet (ruido) + infraestructura ONNX/CUDA compartida
@@ -184,7 +285,8 @@ photoraw/
   upscale.py     Real-ESRGAN (superresolución)
   models.py      catálogo de las IAs descargables (AI_MODELS)
   ui/            PySide6: ventana principal, visor con zoom/recorte/máscaras,
-                 editor de curvas, ventana de modelos de IA
+                 editor de curvas, ventana de modelos de IA, diálogo de
+                 fusión HDR
 ```
 
 
