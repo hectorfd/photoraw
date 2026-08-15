@@ -25,6 +25,7 @@ import qtawesome as qta
 
 from photoraw import (ai, diskcache, engine, face_parse, faces, generative,
                       hardware, hdr, heal, loader, masks_ai, presets, upscale)
+from photoraw import ajustes
 from photoraw.edits import EditStore
 from photoraw.ui.curve_widget import CurveWidget, HistogramWidget
 
@@ -2782,6 +2783,8 @@ class MainWindow(QMainWindow):
         self.thumb_cancel["stop"] = True
         self.thumb_cancel = {"stop": False}
         self.folder = Path(folder)
+        # para reabrirla sola la proxima vez que arranques
+        ajustes.guardar_carpeta(self.folder)
         self.store = EditStore(self.folder)
         self.current_path = None
         self.base_cache.clear()
@@ -5273,6 +5276,13 @@ def main():
     win = MainWindow()
     win.show()
     splash.close()
+    # se vuelve a donde lo dejaste: la carpeta de la ultima sesion. Va
+    # despues de show() para que la ventana ya este en pantalla mientras se
+    # leen las miniaturas, en vez de dejarte mirando el vacio.
+    ultima = ajustes.ultima_carpeta()
+    if ultima is not None:
+        app.processEvents()
+        win.load_folder(ultima)
     sys.exit(app.exec())
 
 
