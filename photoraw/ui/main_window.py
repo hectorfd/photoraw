@@ -2445,6 +2445,25 @@ class MainWindow(QMainWindow):
             "Retoque de rostros IA solo en la zona de la máscara.\n"
             "La primera vez en cada foto la IA tarda unos segundos.")
 
+        line_c = QFrame()
+        line_c.setFrameShape(QFrame.HLine)
+        line_c.setStyleSheet("color: #3a3a3a; background: #3a3a3a; max-height: 1px;")
+        v.addWidget(line_c)
+        sec_c = QLabel("CURVA DE TONOS")
+        sec_c.setStyleSheet("color: #8a8a8a; font-size: 11px; font-weight: bold;")
+        v.addWidget(sec_c)
+        self.mask_curve = CurveWidget()
+        self.mask_curve.setToolTip(
+            "Curva de tonos solo dentro de la máscara.\n"
+            "Clic para añadir un punto, arrastrarlo fuera para quitarlo.\n"
+            "Se aplica después de los deslizadores de arriba.")
+        self.mask_curve.curveChanged.connect(self.on_mask_curve_changed)
+        v.addWidget(self.mask_curve)
+        b_curve_reset = QPushButton(icon("mdi6.restore"), "Restablecer curva")
+        b_curve_reset.setToolTip("Deja la curva recta, sin efecto")
+        b_curve_reset.clicked.connect(self.reset_mask_curve)
+        v.addWidget(b_curve_reset)
+
         b_erase = QPushButton(icon("mdi6.creation"), "Borrar con IA (rellenar fondo)")
         b_erase.setToolTip(
             "Hace desaparecer lo que cubre la máscara seleccionada y\n"
@@ -4186,6 +4205,14 @@ class MainWindow(QMainWindow):
         self.mask_feather.setValue(int((m or {}).get("feather", 50.0))
                                    if con_feather else 50)
         self.mask_feather.blockSignals(False)
+        # la curva es de cada mascara: al cambiar de una a otra hay que
+        # ensenar la suya, y sin disparar la senal (si no, seleccionar una
+        # mascara le escribiria encima la curva de la anterior)
+        self.mask_curve.blockSignals(True)
+        self.mask_curve.set_curve(
+            adjust.get(engine.MASK_CURVE_KEY) or engine.DEFAULT_CURVE)
+        self.mask_curve.blockSignals(False)
+        self.mask_curve.setEnabled(m is not None)
 
     def on_mask_selected(self, _row):
         self._sync_mask_controls()
@@ -4233,6 +4260,26 @@ class MainWindow(QMainWindow):
             self.run_ai_faces(path=path)
         self.statusBar().showMessage(
             "IA calculando… el efecto aparecerá en la zona de la máscara al terminar")
+
+    def on_mask_curve_changed(self, points):
+        """La curva de la mascara seleccionada. Se guarda dentro de `adjust`,
+        con los demas ajustes locales, para que viaje con ella al copiar y
+        pegar la edicion."""
+        m = self._current_mask()
+        if m is None:
+            return
+        m.setdefault("adjust", {})[engine.MASK_CURVE_KEY] = points
+        self._save_masks()
+        self._throttle_render()
+
+    def reset_mask_curve(self):
+        m = self._current_mask()
+        if m is None:
+            return
+        m.setdefault("adjust", {})[engine.MASK_CURVE_KEY] =             [list(p) for p in engine.DEFAULT_CURVE]
+        self.mask_curve.set_curve(engine.DEFAULT_CURVE)
+        self._save_masks()
+        self.request_render()
 
     def on_mask_invert(self, on):
         m = self._current_mask()

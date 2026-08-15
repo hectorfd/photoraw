@@ -367,6 +367,12 @@ DEFAULT_EDITS.update({
 # Las coordenadas son relativas a la foto YA recortada/girada (lo que se ve)
 DEFAULT_EDITS.update({"masks": []})
 
+# La curva de la mascara va aparte de los demas ajustes: todos ellos son un
+# numero (y valen 0 cuando no se tocan), mientras que esto es una lista de
+# puntos. Por eso no entra en MASK_ADJUST_KEYS, que es lo que la interfaz
+# recorre para fabricar deslizadores.
+MASK_CURVE_KEY = "curve"
+
 MASK_ADJUST_KEYS = ("exposure", "contrast", "highlights", "shadows",
                     "whites", "blacks", "temperature", "tint",
                     "saturation", "vibrance", "clarity", "texture",
@@ -935,6 +941,19 @@ def _mask_box(wmap, margin=8):
             max(int(cols[0]) - margin, 0), min(int(cols[-1]) + 1 + margin, w))
 
 
+def mask_has_curve(mask):
+    """Si esta mascara trae una curva que de verdad cambia algo.
+
+    Una curva "sin tocar" es la diagonal: entra un tono y sale el mismo. Se
+    compara convirtiendo a listas porque los puntos vienen del JSON y podrian
+    llegar como tuplas o con enteros donde habia decimales.
+    """
+    puntos = (mask.get("adjust") or {}).get(MASK_CURVE_KEY)
+    if not puntos or len(puntos) < 2:
+        return False
+    return [[float(x), float(y)] for x, y in puntos] != DEFAULT_CURVE
+
+
 def _mask_recipe(sub, wmap, a):
     """Aplica la receta de UNA mascara sobre `sub` (vista de la foto, se
     modifica en el sitio), pesada por `wmap`.
@@ -958,6 +977,16 @@ def _mask_recipe(sub, wmap, a):
         toned -= sub
         toned *= wc
         sub += toned
+
+    # 1b. Curva de tonos de la mascara. Va detras de los seis mandos, igual
+    # que en el panel general: primero se coloca el tono y despues la curva
+    # dibuja sobre lo ya colocado.
+    if mask_has_curve({"adjust": a}):
+        lut = pchip_lut(a[MASK_CURVE_KEY], LUT_N).astype(np.float32)
+        curved = lut[_lut_index(sub)]
+        curved -= sub
+        curved *= wc
+        sub += curved
 
     # 2. Balance de blancos
     temp = a.get("temperature", 0.0) / 100.0
@@ -1030,7 +1059,8 @@ def _mask_recipe(sub, wmap, a):
 def _apply_masks(img, e, ai_masks=None, region=None):
     """Ajustes locales: cada mascara aplica su receta pesada por su mapa."""
     todo = [m for m in (e.get("masks") or [])
-            if any((m.get("adjust") or {}).get(k) for k in MASK_ADJUST_KEYS)]
+            if any((m.get("adjust") or {}).get(k) for k in MASK_ADJUST_KEYS)
+            or mask_has_curve(m)]
     if not todo:
         return img
     h, w = img.shape[:2]

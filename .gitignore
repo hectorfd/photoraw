@@ -63,6 +63,11 @@ test_export.jpg
 /*.jpeg
 /*.png
 
+# ---- Notas de trabajo -----------------------------------------------
+# Referencia interna y diario de desarrollo: son apuntes propios, no
+# documentación del proyecto. El README es lo que se publica.
+NOTAS.md
+
 # ---- Ajustes locales de la máquina ----------------------------------
 # Toda la configuración de Claude Code: es de esta máquina, no del proyecto
 .claude/

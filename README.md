@@ -58,9 +58,10 @@ rectángulo con las esquinas sueltas (moviéndolas una a una lo conviertes en
 trapecio, ideal para agarrar una ventana o una puerta que salen en
 perspectiva), pincel a mano alzada, y selección automática con IA del sujeto,
 del fondo o de partes del rostro (piel, cabello, ojos, labios, dientes). Cada
-máscara tiene sus propios ajustes, se puede invertir y se retoca a mano si le
-falta o le sobra algo. Dentro de una máscara también puedes aplicar la
-reducción de ruido o el retoque de rostros con IA.
+máscara tiene sus propios ajustes —incluida **su propia curva de tonos**—, se
+puede invertir y se retoca a mano si le falta o le sobra algo. Dentro de una
+máscara también puedes aplicar la reducción de ruido o el retoque de rostros
+con IA.
 
 **Fusión HDR.** Junta las tomas de un bracketing en una sola foto con detalle
 tanto en las sombras como en las luces. El programa encuentra las tandas por
@@ -118,6 +119,3 @@ photoraw/
   diskcache.py    caché en disco
   ui/             la interfaz, hecha con PySide6
 ```
-
-Si quieres el detalle de cada parte, las decisiones técnicas y el diario de
-desarrollo, está todo en [NOTAS.md](NOTAS.md).
