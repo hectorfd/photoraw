@@ -25,7 +25,9 @@ uses para recuperar el espacio.
 
 ### Revelado (pestaña Revelar)
 - **Perfil**: interpretación base del RAW — Estándar, Vívido, Retrato,
-  Paisaje, Plano (para editar) y Blanco y negro.
+  Paisaje, Blanco y negro, y **RAW (sin perfil)**, que no interpreta nada:
+  ni curva base ni corrección automática de exposición, el archivo tal como
+  sale de la cámara para revelarlo desde cero.
 - **Ajustes básicos**: exposición, contraste, luces, sombras, blancos,
   negros, temperatura, matiz, textura, borrar neblina, saturación, vitalidad.
 - **Curva de tonos**: paramétrica, de puntos y por canal (RGB / R / G / B).
@@ -35,9 +37,27 @@ uses para recuperar el espacio.
   solo ese color (matiz hasta ±180°, saturación, luminancia y rango).
 - **Calibración**: matiz de sombras y tono/saturación de cada primario RGB
   (la matriz conserva los neutros: los grises jamás se tiñen).
-- **Detalle**: enfoque (cantidad/radio/detalle/máscara — Alt para ver la
-  máscara), reducción de ruido manual (luminancia/color).
-- **Efectos**: grano de película (cantidad, tamaño, aspereza).
+- **Detalle**: enfoque (cantidad hasta 300, radio, detalle, máscara — Alt para
+  ver la máscara), reducción de ruido manual (luminancia/color).
+- **Píxeles reales al acercarse**: al pasar del 100% de zoom, PhotoRAW abre el
+  archivo completo y revela solo el trozo que estás mirando, a resolución
+  real. Antes se estiraba la vista previa (que tiene la cuarta parte de los
+  píxeles) y no se podían juzgar ni el enfoque ni el ruido.
+- **Efectos** (panel propio, se aplican al final del revelado y en este orden):
+  - **Dramático**: contraste local fuerte y color contenido, el aire duro de
+    reportaje. Cantidad, contraste local, brillo, saturación.
+  - **Estado de ánimo**: recetas de color completas (cálido, frío, cine,
+    sepia, bosque, atardecer, nocturno) mezclables a gusto.
+  - **Virado**: un color en las luces y otro en las sombras, con equilibrio
+    para mover la frontera. Tiñe sin cambiar el brillo.
+  - **Mate**: negros levantados y luces recogidas, como una copia antigua.
+  - **Místico**: luz difusa de ensueño, con control de cuánto entra en las
+    sombras y cuánto detalle fino se lima.
+  - **Brillo**: enfoque suave, brillo (halo), efecto Orton y Orton suave.
+  - **Grano de película**: cantidad, tamaño, aspereza.
+
+  Los radios de difuminado son relativos al tamaño de la foto, así que el
+  efecto se ve igual en pantalla que en el archivo exportado.
 - Todos los deslizadores de color llevan **pistas degradadas** que indican
   hacia dónde va el ajuste (estilo Lightroom).
 

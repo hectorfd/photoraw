@@ -31,7 +31,7 @@ def _mw():
 
 
 class _Signals(QObject):
-    shots_ready = Signal(int, object)          # tanda, lista de tomas (o None)
+    shots_ready = Signal(object, object)       # clave, lista de tomas (o None)
     fused_ready = Signal(int, int, object)     # tanda, generacion, resultado
 
 
@@ -52,21 +52,26 @@ def _avisar(señal, *args):
 
 class _LoadJob(QRunnable):
     """Carga las tomas de una tanda en pequeno. Es la parte lenta: hay que
-    decodificar un RAW por toma."""
+    decodificar un RAW por toma.
 
-    def __init__(self, index, paths, signals):
+    `linear` distingue los dos revelados que hacen falta (ver hdr.load_shot),
+    y por eso la clave de la cache lleva tanda Y revelado: al cambiar de
+    metodo hay que volver a decodificar.
+    """
+
+    def __init__(self, key, paths, signals):
         super().__init__()
-        self.index = index
+        self.key = key                     # (tanda, linear)
         self.paths = paths
         self.signals = signals
 
     def run(self):
         try:
             shots = hdr.load_group(self.paths, half_size=True,
-                                   max_side=PREVIEW_SIDE)
+                                   max_side=PREVIEW_SIDE, linear=self.key[1])
         except Exception:
             shots = None
-        _avisar(self.signals.shots_ready, self.index, shots)
+        _avisar(self.signals.shots_ready, self.key, shots)
 
 
 class _FuseJob(QRunnable):
@@ -107,21 +112,23 @@ SLIDERS = {
     ],
     hdr.HDR: [
         ("intensity", "Brillo", -400, 400, "num",
-         "Sube o baja toda la foto al comprimir el rango.\n"
-         "Es el mando gordo: empieza por aqui."),
+         "Dónde cae el gris medio de la escena, en pasos de luz.\n"
+         "Es el mando gordo: empieza por aquí. Cada punto es un paso\n"
+         "entero, igual que el compensador de exposición de la cámara."),
         ("gamma", "Gamma", 50, 350, "num",
          "Reparto entre sombras y luces. El mapa de luz que sale de la\n"
          "fusion es lineal, y 2,2 es lo que lo pasa a como lo ve el ojo.\n"
          "Subirlo aclara los medios tonos y abre las sombras; bajarlo los\n"
          "oscurece y da mas cuerpo."),
-        ("light", "Contraste local", 0, 100, "pct",
-         "Si manda el contraste de cada zona (100 %) o el de la foto\n"
-         "entera (0 %). Alto saca mucho detalle local, pero pasarse es\n"
-         "lo que produce el aspecto de HDR de calendario."),
-        ("color", "Fidelidad de color", 0, 100, "pct",
-         "A 0 % cada canal se comprime por su cuenta y los colores salen\n"
-         "mas vivos; al subirlo se respeta mejor el color original de la\n"
-         "escena, a costa de viveza."),
+        ("light", "Proteger luces", 0, 100, "pct",
+         "Cuánto se cuida lo más claro. Subirlo comprime las altas luces\n"
+         "para que no lleguen a quemarse: el cielo y las ventanas conservan\n"
+         "detalle, a cambio de salir más apagados. Bajarlo las deja llegar\n"
+         "a blanco antes, con más brillo y más riesgo de perderlas."),
+        ("color", "Color", 0, 200, "pct",
+         "Saturación del resultado. Viene un poco por encima de 100 %\n"
+         "porque comprimir el rango apaga el color por su cuenta; súbelo\n"
+         "si la fusión te sabe a poco o bájalo si te chilla."),
     ],
 }
 
@@ -138,7 +145,7 @@ class HdrDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Fusionar HDR")
         self.groups = [list(g) for g in groups]
-        self.params = dict(hdr.DEFAULT_PARAMS)
+        self.params = dict(hdr.DEFAULT_PARAMS, format=hdr.DEFAULT_FORMAT)
         self.groups_to_merge = list(self.groups)
 
         self.pool = parent.fast_pool if parent is not None else None
@@ -283,6 +290,23 @@ class HdrDialog(QDialog):
             panel.addWidget(caja)
         self.slider_boxes[hdr.HDR].hide()
 
+        fmt_fila = QHBoxLayout()
+        fmt_fila.addWidget(QLabel("Guardar como:"))
+        self.format_box = _mw().NoWheelCombo()
+        self.format_box.addItem("DNG (RAW lineal)", hdr.DNG)
+        self.format_box.addItem("TIFF de 16 bits", hdr.TIFF)
+        self.format_box.setToolTip(
+            "DNG: un RAW de verdad, con el color todavía por decidir. Es lo\n"
+            "que entrega Lightroom al fusionar un HDR y lo que te deja\n"
+            "reinterpretar el balance de blancos al revelarlo.\n\n"
+            "TIFF: el color ya fijado. Úsalo si te lo vas a llevar a un\n"
+            "programa que no entienda DNG.")
+        self.format_box.currentIndexChanged.connect(
+            lambda _i: self.params.__setitem__("format",
+                                               self.format_box.currentData()))
+        fmt_fila.addWidget(self.format_box, 1)
+        panel.addLayout(fmt_fila)
+
         self.align_box = QCheckBox("Alinear las tomas")
         self.align_box.setChecked(bool(hdr.DEFAULT_PARAMS["align"]))
         self.align_box.setToolTip(
@@ -294,12 +318,11 @@ class HdrDialog(QDialog):
         panel.addWidget(self.align_box)
 
         note = QLabel(
-            "El resultado se guarda como TIFF de 16 bits junto a tus RAW y se "
-            "abre en la tira para que lo reveles como cualquier otra foto. No "
-            "es un RAW: ya lleva el color interpretado, pero con 16 bits "
-            "aguanta que estires sombras y luces sin bandas. Sale plano a "
-            "propósito, con todo el margen recogido: dale contraste y punto "
-            "negro a tu gusto.")
+            "El resultado se guarda junto a tus RAW y se abre en la tira para "
+            "que lo reveles como cualquier otra foto. En DNG se comporta como "
+            "un RAW más: 16 bits y el balance de blancos todavía por decidir. "
+            "Sale algo plano a propósito, con las luces sin quemar: dale el "
+            "contraste y el color a tu gusto.")
         note.setWordWrap(True)
         note.setStyleSheet("color: #8a8a8a;")
         panel.addWidget(note)
@@ -320,34 +343,40 @@ class HdrDialog(QDialog):
 
     # ---------- carga y vista previa ----------
 
+    def _shots_key(self, index):
+        """Que tomas hacen falta para lo que hay pedido ahora mismo."""
+        return (index, hdr.wants_linear(self.params, self._exps.get(index)))
+
     def _request_shots(self, index):
         """Pide las tomas de una tanda (si no estan ya) y refresca la vista."""
         self._current = index
         self._show_source_thumbs(index)
         self._update_method_note()
-        if index in self._shots:
+        key = self._shots_key(index)
+        if key in self._shots:
             self._request_preview()
             return
         self.preview.setText("Cargando las tomas…")
         self.preview.setPixmap(QPixmap())
-        if index not in self._loading:
-            self._loading.add(index)
-            self.pool.start(_LoadJob(index, self.groups[index], self.signals))
+        if key not in self._loading:
+            self._loading.add(key)
+            self.pool.start(_LoadJob(key, self.groups[index], self.signals))
 
-    def _on_shots_ready(self, index, shots):
-        self._loading.discard(index)
+    def _on_shots_ready(self, key, shots):
+        self._loading.discard(key)
+        index = key[0]
         if shots is None:
             if index == self._current:
                 self.preview.setText("No se han podido leer estas tomas")
             return
-        self._shots[index] = shots
-        if index == self._current:
+        self._shots[key] = shots
+        if key == self._shots_key(self._current):
             self._request_preview()
 
     def _request_preview(self):
         """Refusiona la vista previa. Cada peticion estrena generacion, asi
         que la que llegue de un ajuste ya viejo se tira."""
-        shots = self._shots.get(self._current)
+        shots = self._shots.get(self._shots_key(self._current))
         if not shots:
             return
         self._gen += 1
@@ -416,8 +445,10 @@ class HdrDialog(QDialog):
         self.params["method"] = metodo
         for nombre, caja in self.slider_boxes.items():
             caja.setVisible(nombre == metodo)
-        self._update_method_note()
-        self._request_preview()
+        # cada metodo quiere las tomas reveladas de una manera, asi que hay
+        # que volver a pedirlas (van a la cache, cambiar de ida y vuelta no
+        # las decodifica dos veces)
+        self._request_shots(self._current)
 
     def _update_method_note(self):
         """Avisa si la tanda que se esta viendo no puede hacer HDR real."""

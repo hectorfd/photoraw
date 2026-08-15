@@ -34,6 +34,8 @@ cache/
 # Fotos originales y exportaciones: son tuyas, no código. Además un DNG
 # pesa decenas de MB y en Git se quedaría ahí para siempre.
 fotoprueba/
+foto de prueba/
+fotos de prueba/
 test_export.jpg
 *.dng
 *.DNG
@@ -49,6 +51,8 @@ test_export.jpg
 *.ORF
 *.rw2
 *.RW2
+*.heic
+*.HEIC
 *.tif
 *.tiff
 *.psd
@@ -60,7 +64,8 @@ test_export.jpg
 /*.png
 
 # ---- Ajustes locales de la máquina ----------------------------------
-.claude/settings.local.json
+# Toda la configuración de Claude Code: es de esta máquina, no del proyecto
+.claude/
 *.log
 
 # Editores

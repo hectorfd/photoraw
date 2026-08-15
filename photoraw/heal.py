@@ -87,6 +87,36 @@ def needs_model(strokes, h, w):
     return False
 
 
+def _blend_mask(mcrop):
+    """Desvanecido del borde del parche, en proporcion AL PROPIO PARCHE.
+
+    Con un desvanecido fijo en pixeles (era de 4), un retoque impecable en
+    pantalla salia con el borde marcado al exportar: se edita a 2200 px de
+    ancho y se exporta a 4032, asi que esos 4 pixeles pasaban de ser el
+    0,18 % del lado al 0,099 %. Media transicion, y el contorno asomando.
+
+    La medida buena es el tamano del parche, que ya escala solo porque los
+    trazos se guardan en coordenadas normalizadas. Lo que NO vale es atarlo
+    al lado de la foto: probado, dejaba el desvanecido mas ancho que los
+    retoques pequenos, y entonces el centro del parche se quedaba a medio
+    aplicar (al 54 % en una mota de 20 px) con el defecto transparentandose
+    por debajo. De ahi el aspecto sucio y difuso.
+
+    Por eso ademas se ensancha el nucleo antes de difuminarlo: garantiza que
+    donde pintaste el parche entra AL COMPLETO y la transicion cae por fuera,
+    que es lo que hace falta para que el defecto no vuelva a asomar.
+    """
+    ys, xs = np.where(mcrop > 0)
+    if not ys.size:
+        return np.zeros(mcrop.shape + (1,), np.float32)
+    lado = max(ys.max() - ys.min(), xs.max() - xs.min(), 1)
+    sigma = float(np.clip(lado * 0.12, 1.5, 24.0))
+    radio = int(max(1, round(sigma)))
+    nucleo = cv2.dilate((mcrop > 0).astype(np.float32),
+                        np.ones((radio * 2 + 1, radio * 2 + 1), np.uint8))
+    return cv2.GaussianBlur(nucleo, (0, 0), sigma)[..., None]
+
+
 def _fast_inpaint_region(img, mask, y0, y1, x0, x1):
     """Relleno clasico instantaneo (Telea) para manchas pequenas."""
     crop = img[y0:y1, x0:x1]
@@ -95,7 +125,7 @@ def _fast_inpaint_region(img, mask, y0, y1, x0, x1):
     crop8 = (np.clip(crop, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     out8 = cv2.inpaint(crop8, hard, 5, cv2.INPAINT_TELEA)
     out = out8.astype(np.float32) / 255.0
-    blend = cv2.GaussianBlur((mcrop > 0).astype(np.float32), (0, 0), 2)[..., None]
+    blend = _blend_mask(mcrop)
     img[y0:y1, x0:x1] = crop * (1.0 - blend) + out * blend
 
 
@@ -125,7 +155,26 @@ def _inpaint_region(img, mask, y0, y1, x0, x1):
     # de alrededor. Se re-amplia con Real-ESRGAN, igual que el borrado
     # generativo, para que la nitidez combine con el resto de la foto.
     out = _sharpen_patch(out, cw, ch)
-    blend = cv2.GaussianBlur((mcrop > 0).astype(np.float32), (0, 0), 4)[..., None]
+
+    # El modelo rellena la ventana ENTERA, no solo lo pintado, asi que fuera
+    # de la mascara su respuesta deberia coincidir con la foto. Lo que se
+    # desvie ahi es el sesgo que trae el parche (viene de haber pasado por
+    # 512x512), y es el mismo sesgo que tiene dentro. Restarlo es lo que
+    # evita que el parche se vea como una mancha de otro tono: sin esto, el
+    # salto de nivel en el borde se triplicaba al exportar.
+    fuera = mcrop == 0
+    if int(fuera.sum()) > 100:
+        for c in range(out.shape[2]):
+            sesgo = (float(np.median(crop[..., c][fuera]))
+                     - float(np.median(out[..., c][fuera])))
+            out[..., c] += sesgo
+        out = np.clip(out, 0.0, 1.0)
+
+    # OJO: el desvanecido del borde va en FRACCION del parche, no en pixeles.
+    # Con un valor fijo, la misma foto exportada al doble de resolucion tenia
+    # una transicion la mitad de ancha en proporcion, y ahi es donde se veia
+    # el contorno del parche que en pantalla no estaba.
+    blend = _blend_mask(mcrop)
     img[y0:y1, x0:x1] = crop * (1.0 - blend) + out * blend
 
 

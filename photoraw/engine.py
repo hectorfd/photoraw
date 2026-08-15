@@ -98,7 +98,30 @@ def smart_exposure(img, ev):
     return np.clip(img * (1.0 + (sf - 1.0) * factor)[..., None], 0.0, 1.0)
 
 
-def auto_tone(img, target=0.42):
+def auto_tone_weight(img, target=0.42):
+    """Cuanto hay que levantar esta foto, de 0 (nada) a 1 (todo).
+
+    Va aparte de `auto_tone` porque la medida tiene que salir de la foto
+    ENTERA: la vista de detalle revela solo el trozo que estas mirando, y si
+    cada trozo se midiera a si mismo, un recorte de una pared clara y otro de
+    una sombra saldrian con exposiciones distintas."""
+    h, w = img.shape[:2]
+    small = cv2.resize(img, (max(w // 8, 1), max(h // 8, 1)),
+                       interpolation=cv2.INTER_AREA)
+    med = float(np.median(_luminance(small)))
+    if med >= target:
+        return 0.0
+    # `float(...)` a proposito: np.clip devuelve un np.float64 y multiplicar
+    # la foto (float32) por un escalar float64 la asciende ENTERA a float64.
+    # Asi salia de aqui, y el resto del revelado seguia en float64: el doble
+    # de memoria y unas 3,5 veces mas lento por operacion, sin ninguna
+    # ganancia de calidad visible (la foto acaba en 8 bits por canal)
+    deficit = float(np.clip((target - med) / target, 0.0, 1.0))
+    weight = deficit ** 1.5
+    return weight if weight >= 0.01 else 0.0
+
+
+def auto_tone(img, target=0.42, weight=None, log_avg=None):
     """Correccion automatica de exposicion al abrir un RAW (como hacen
     Lightroom / Windows Fotos): solo entra cuando la foto esta realmente
     oscura (contraluces, interiores), y no toca las que ya estan bien
@@ -109,30 +132,34 @@ def auto_tone(img, target=0.42):
     Args:
         img: float32 RGB 0..1 (salida del revelado RAW, ya con gamma)
         target: mediana de luminancia deseada para una foto "bien expuesta"
+        weight: fuerza ya medida sobre la foto entera (vista de detalle);
+                si no se pasa, se mide aqui sobre `img`
     Returns:
         float32 RGB 0..1
     """
-    h, w = img.shape[:2]
-    small = cv2.resize(img, (max(w // 8, 1), max(h // 8, 1)), interpolation=cv2.INTER_AREA)
-    med = float(np.median(_luminance(small)))
-    if med >= target:
+    if weight is None:
+        weight = auto_tone_weight(img, target)
+    if weight <= 0.0:
         return img
-    # `float(...)` a proposito: np.clip devuelve un np.float64 y multiplicar
-    # la foto (float32) por un escalar float64 la asciende ENTERA a float64.
-    # Asi salia de aqui, y el resto del revelado seguia en float64: el doble
-    # de memoria y unas 3,5 veces mas lento por operacion, sin ninguna
-    # ganancia de calidad visible (la foto acaba en 8 bits por canal)
-    deficit = float(np.clip((target - med) / target, 0.0, 1.0))
-    weight = deficit ** 1.5
-    if weight < 0.01:
-        return img
-    mapped = tone_mapping(img, key=0.35)
+    mapped = tone_mapping(img, key=0.35, log_avg=log_avg)
     mapped *= weight                    # mapped es nuestro: se puede pisar
     mapped += img * (1.0 - weight)
     return mapped
 
 
-def tone_mapping(img, key=0.18, saturation=1.0):
+def log_avg_luminance(img):
+    """Luminancia media geometrica: el brillo "de referencia" de una foto.
+
+    Se mide sobre la foto ENTERA. La vista de detalle revela trozos sueltos y
+    cada trozo tiene su propio brillo medio; si cada uno se midiera a si
+    mismo, el trozo de una sombra saldria aclarado y el de una pared clara
+    oscurecido, y no pegarian ni entre ellos ni con la foto."""
+    lum = img * np.array([0.2126, 0.7152, 0.0722], np.float32)
+    lum = lum.sum(axis=-1)
+    return float(np.exp(np.log(lum + 1e-6).mean()))
+
+
+def tone_mapping(img, key=0.18, saturation=1.0, log_avg=None):
     """Mapeo tonal adaptativo (Reinhard modificado).
     
     Convierte datos lineales del RAW a una imagen con apariencia natural,
@@ -146,17 +173,13 @@ def tone_mapping(img, key=0.18, saturation=1.0):
     Returns:
         float32 RGB 0..1 con tonos mapeados
     """
-    # Calcular luminancia. Se deja tal cual (una copia de la foto entera y
-    # luego sumar el eje del color) a proposito: hacerlo con _luminance suma
-    # los tres canales en otro orden y en float32 eso mueve el ultimo bit —
-    # movia 1/255 en un pixel de cada 100.000, invisible pero distinto
-    lum = img * np.array([0.2126, 0.7152, 0.0722], np.float32)
-    lum = lum.sum(axis=-1)
-
-    # Luminancia promedio geometrico (mas preciso que aritmetico)
-    log_lum = np.log(lum + 1e-6)
-    log_avg = np.exp(log_lum.mean())
-    del lum, log_lum
+    # Luminancia promedio geometrico (mas preciso que aritmetico). Se calcula
+    # tal cual (una copia de la foto entera y luego sumar el eje del color) a
+    # proposito: hacerlo con _luminance suma los tres canales en otro orden y
+    # en float32 eso mueve el ultimo bit — movia 1/255 en un pixel de cada
+    # 100.000, invisible pero distinto
+    if log_avg is None:
+        log_avg = log_avg_luminance(img)
 
     # Factor de escala basado en el key value
     scale = key / (log_avg + 1e-6)
@@ -225,7 +248,7 @@ DEFAULT_EDITS = {
     "clarity": 0.0,      # -100 .. 100 (contraste local en medios tonos)
     "dehaze": 0.0,       # -100 .. 100 (borrar neblina)
     # Enfoque (panel Detalle)
-    "sharp_amount": 0.0,   # 0 .. 150
+    "sharp_amount": 0.0,   # 0 .. 300
     "sharp_radius": 1.0,   # 0.5 .. 3.0
     "sharp_detail": 25.0,  # 0 .. 100
     "sharp_masking": 0.0,  # 0 .. 100
@@ -236,6 +259,30 @@ DEFAULT_EDITS = {
     "ai_denoise": 0.0,     # 0 .. 100
     # Retoque de rostros IA (intensidad de mezcla; se aplica fuera del motor)
     "ai_face": 0.0,        # 0 .. 100
+    # --- Efectos creativos (panel Efectos) -----------------------------
+    # Todos van al final del revelado, sobre la foto ya ajustada, y en este
+    # mismo orden: primero los que cambian el contraste y el color, luego los
+    # que anaden luz difusa, y el grano el ultimo (como en el laboratorio)
+    "dramatic_amount": 0.0,      # 0 .. 100  fuerza del look dramatico
+    "dramatic_contrast": 0.0,    # 0 .. 100  contraste local extra
+    "dramatic_brightness": 0.0,  # -100 .. 100
+    "dramatic_saturation": 0.0,  # -100 .. 100
+    "mood_preset": "none",       # clave de MOOD_RECIPES
+    "mood_amount": 50.0,         # 0 .. 100  mezcla del virado de color
+    "tone_hi_hue": 45.0,         # 0 .. 360  virado de las luces
+    "tone_hi_sat": 0.0,          # 0 .. 100
+    "tone_sh_hue": 220.0,        # 0 .. 360  virado de las sombras
+    "tone_sh_sat": 0.0,          # 0 .. 100
+    "tone_balance": 0.0,         # -100 (mas sombra) .. 100 (mas luz)
+    "matte_amount": 0.0,         # 0 .. 100  negros levantados, look mate
+    "matte_fade": 50.0,          # 0 .. 100  cuanto se levanta el negro
+    "matte_contrast": 0.0,       # -100 .. 100  contraste de compensacion
+    "mystical_amount": 0.0,      # 0 .. 100  luz difusa de ensueno
+    "mystical_shadows": 25.0,    # 0 .. 100  cuanto entra en las sombras
+    "mystical_smooth": 0.0,      # -100 .. 100  suavizado del detalle fino
+    "glow_mode": "orton",        # clave de GLOW_MODES
+    "glow_amount": 0.0,          # 0 .. 100
+    "glow_smooth": 50.0,         # 0 .. 100  radio del difuminado
     # Grano de pelicula
     "grain_amount": 0.0,   # 0 .. 100
     "grain_size": 25.0,    # 0 .. 100
@@ -289,9 +336,17 @@ PROFILE_RECIPES = {
     "vivid":     ([[0.0, 0.0], [0.25, 0.225], [0.5, 0.51], [0.75, 0.79], [1.0, 1.0]], 1.22),
     "portrait":  ([[0.0, 0.0], [0.25, 0.245], [0.5, 0.505], [0.75, 0.765], [1.0, 1.0]], 1.06),
     "landscape": ([[0.0, 0.0], [0.25, 0.232], [0.5, 0.508], [0.75, 0.782], [1.0, 1.0]], 1.15),
-    "flat":      ([[0.0, 0.06], [0.5, 0.5], [1.0, 0.94]], 0.88),
     "bw":        ([[0.0, 0.0], [0.25, 0.235], [0.5, 0.505], [0.75, 0.775], [1.0, 1.0]], 0.0),
 }
+
+# El perfil "RAW" no tiene receta a proposito: es la AUSENCIA de todas. Con
+# el puesto, el revelado se salta la interpretacion base del archivo -- ni
+# arreglo automatico de exposicion ni curva base -- y te ensena lo que hay
+# en el archivo, sin lectura previa de nadie. Es el punto de partida honesto
+# para revelar desde cero (ver apply_edits).
+RAW_PROFILE = "raw"
+# El viejo "Plano" ocupaba esta misma casilla en el menu
+PROFILE_ALIASES = {"flat": RAW_PROFILE}
 
 # Calibracion de camara (como en Lightroom): redefine los primarios y
 # tine las sombras. Actua sobre la mezcla de canales, antes que todo lo demas
@@ -313,7 +368,9 @@ DEFAULT_EDITS.update({
 DEFAULT_EDITS.update({"masks": []})
 
 MASK_ADJUST_KEYS = ("exposure", "contrast", "highlights", "shadows",
-                    "temperature", "tint", "saturation")
+                    "whites", "blacks", "temperature", "tint",
+                    "saturation", "vibrance", "clarity", "texture",
+                    "dehaze", "sharp_amount")
 # IA local por mascara: se mezcla el resultado IA solo en la zona de la mascara
 MASK_AI_KEYS = ("ai_denoise", "ai_face")
 
@@ -440,20 +497,38 @@ def _tone_curve_lut(exposure, contrast, shadows, highlights, whites, blacks,
         span = max(white_point - black_point, 0.01)
         x = np.clip((x - black_point) / span, 0.0, 1.0)
 
-    # 2. Sombras y luces: curvas suaves tipo sigmoid por zona
-    #    Sombras: afecta desde ~0.05 hasta ~0.5 (protege negros puros)
-    #    Luces: afecta desde ~0.5 hasta ~0.95 (protege blancos puros)
+    # 2. Sombras y luces: se ESTIRA la zona, no se le suma luz.
+    #
+    #    Antes se sumaba una campana de luz a los tonos oscuros. Sumar sube el
+    #    nivel pero deja los tonos igual de juntos: dos sombras que se
+    #    diferenciaban en 0,03 se siguen diferenciando en 0,03, solo que ahora
+    #    son grises claros. No aparece ni un detalle nuevo — es exactamente el
+    #    aspecto de "sombra pintada de gris". Y peor: la bajada de la campana
+    #    apretaba todo lo que habia entre 0,15 y 0,40 en una franja estrecha
+    #    (medido: los tonos salian con el 39 % de su separacion original), que
+    #    es la meseta gris que se veia.
+    #
+    #    Estirar con una gamma hace lo contrario: separa los tonos oscuros
+    #    entre si, que es lo que hace visible el detalle que ya estaba en el
+    #    archivo. Ademas el negro puro se queda clavado en 0 solo (cero
+    #    elevado a lo que sea es cero), sin necesidad de rampas de proteccion.
+    if shadows:
+        # +1 -> gamma 0,57 (estira las sombras); -1 -> 4,0 (las hunde)
+        g = 1.0 / (1.0 + shadows * 0.75)
+        estirada = np.power(x, g, dtype=np.float32)
+        # solo la zona oscura, desvaneciendose hacia los medios tonos
+        m = np.clip(1.0 - x / 0.60, 0.0, 1.0) ** 1.4
+        x = x + (estirada - x) * m
+    if highlights:
+        # lo mismo visto desde el blanco: se trabaja sobre 1-x, asi que el
+        # blanco puro queda clavado en 1 por la misma razon
+        inv = 1.0 - x
+        g = 1.0 / (1.0 - highlights * 0.75)
+        recogida = 1.0 - np.power(inv, g, dtype=np.float32)
+        m = np.clip((x - 0.40) / 0.60, 0.0, 1.0) ** 1.4
+        x = x + (recogida - x) * m
     if shadows or highlights:
-        # Zona de sombras: pico en 0.15, ancho 0.35
-        sh_mask = np.exp(-((x - 0.15) / 0.35) ** 2)
-        # Proteger negros puros: rampa de 0 en x=0 a 1 en x=0.08
-        sh_mask *= np.clip(x / 0.08, 0.0, 1.0)
-        # Zona de luces: pico en 0.85, ancho 0.35
-        hi_mask = np.exp(-((x - 0.85) / 0.35) ** 2)
-        # Proteger blancos puros: rampa de 1 en x=0.92 a 0 en x=1.0
-        hi_mask *= np.clip((1.0 - x) / 0.08, 0.0, 1.0)
-        x = np.clip(x + shadows * 0.25 * sh_mask + highlights * 0.25 * hi_mask,
-                     0.0, 1.0)
+        x = np.clip(x, 0.0, 1.0)
 
     # 3. Exposicion: multiplica en escala lineal (como Lightroom)
     #    Ancla negros: pixel 0 sigue siendo 0
@@ -639,6 +714,44 @@ def _apply_refine(wmap, strokes, h, w):
     return wmap
 
 
+def _poly_weight(mask, h, w):
+    """Mapa de peso de una mascara de puntos (cuadrado, rectangulo o libre).
+
+    `points` son las esquinas en coordenadas 0..1, en orden. Cuatro para el
+    rectangulo de siempre, pero valen las que sean: moviendo las esquinas por
+    separado sale un trapecio, que es lo que hace falta para agarrar una
+    ventana o una puerta vistas en perspectiva —rectangulos en la pared, pero
+    nunca rectangulos en la foto.
+
+    El desvanecido se mide en FRACCION del tamano de la mascara, no en
+    pixeles. Asi el borde se ve igual de suave en la pantalla y en la foto
+    exportada al doble de resolucion; con pixeles fijos, lo que en pantalla
+    era una transicion amable salia como un corte al exportar.
+    """
+    pts = mask.get("points") or []
+    if len(pts) < 3:
+        return None
+    poly = np.array([[float(x) * w, float(y) * h] for x, y in pts], np.float32)
+    relleno = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(relleno, [np.round(poly).astype(np.int32)], 255)
+
+    f = max(float(mask.get("feather", 50.0)) / 100.0, 0.0)
+    if f <= 1e-3:
+        return (relleno > 0).astype(np.float32)
+    # tamano de referencia: el lado corto del rectangulo que la envuelve
+    lado = max(min(np.ptp(poly[:, 0]), np.ptp(poly[:, 1])), 4.0)
+    radio = max(lado * f * 0.5, 1.0)
+    # Distancia con signo al borde: positiva dentro, negativa fuera.
+    # DIST_MASK_PRECISE y no la mascara de 3x3: esa aproxima la distancia a
+    # saltos de rey y deja rayos visibles saliendo de cada esquina cuando el
+    # desvanecido es amplio.
+    dentro = cv2.distanceTransform(relleno, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    fuera = cv2.distanceTransform(255 - relleno, cv2.DIST_L2,
+                                  cv2.DIST_MASK_PRECISE)
+    firmada = dentro - fuera
+    return _smoothstep(firmada / (2.0 * radio) + 0.5).astype(np.float32)
+
+
 def mask_weight(mask, h, w, get_ai=None):
     """Mapa de peso 0..1 de una mascara para una imagen de h x w.
     `get_ai(tipo)` provee el mapa de la segmentacion IA (o None)."""
@@ -664,6 +777,10 @@ def mask_weight(mask, h, w, get_ai=None):
         ys = np.arange(h, dtype=np.float32)[:, None]
         nd = np.sqrt(((xs - cx) / rx) ** 2 + ((ys - cy) / ry) ** 2)
         wmap = _smoothstep((1.0 + f - nd) / (2.0 * f))
+    elif kind == "poly":
+        wmap = _poly_weight(mask, h, w)
+        if wmap is None:
+            return None
     elif kind == "brush":
         wmap = _rasterize_mask_strokes(mask.get("strokes") or [], h, w)
     elif kind in ("subject", "background"):
@@ -800,53 +917,145 @@ def _blend_ai_masked(img, e, ai_masks, denoised, faced, base):
     return img
 
 
-def _apply_masks(img, e, ai_masks=None):
+def _mask_box(wmap, margin=8):
+    """Rectangulo donde la mascara pesa algo (con un margen, para que los
+    filtros de radio no se noten cortados en el borde).
+
+    Es lo que hace que ajustar una mascara no cueste lo mismo que revelar la
+    foto entera: fuera de ese rectangulo el peso es cero y aplicar la receta
+    ahi seria calcular para multiplicar por 0. Devuelve None si la mascara
+    esta vacia."""
+    hit = wmap > 1e-4
+    rows = np.flatnonzero(hit.any(axis=1))
+    if not rows.size:
+        return None
+    cols = np.flatnonzero(hit.any(axis=0))
+    h, w = wmap.shape
+    return (max(int(rows[0]) - margin, 0), min(int(rows[-1]) + 1 + margin, h),
+            max(int(cols[0]) - margin, 0), min(int(cols[-1]) + 1 + margin, w))
+
+
+def _mask_recipe(sub, wmap, a):
+    """Aplica la receta de UNA mascara sobre `sub` (vista de la foto, se
+    modifica en el sitio), pesada por `wmap`.
+
+    Mismas formulas que el panel general, para que un ajuste valga lo mismo
+    dentro que fuera de una mascara, y cada efecto se mezcla con el peso:
+    resultado = foto + (foto_con_el_efecto - foto) * peso."""
+    wc = wmap[..., None]
+
+    # 1. Tono: los seis mandos forman UNA curva, igual que arriba
+    tone = {k: a.get(k, 0.0) for k in ("exposure", "contrast", "highlights",
+                                       "shadows", "whites", "blacks")}
+    if any(tone.values()):
+        lut = _tone_curve_lut(exposure=tone["exposure"] / 3.0,
+                              contrast=tone["contrast"] / 100.0,
+                              shadows=tone["shadows"] / 100.0,
+                              highlights=tone["highlights"] / 100.0,
+                              whites=tone["whites"] / 100.0,
+                              blacks=tone["blacks"] / 100.0)
+        toned = lut[_lut_index(sub)]
+        toned -= sub
+        toned *= wc
+        sub += toned
+
+    # 2. Balance de blancos
+    temp = a.get("temperature", 0.0) / 100.0
+    tint = a.get("tint", 0.0) / 100.0
+    if temp:
+        sub[..., 0] *= 1.0 + 0.30 * temp * wmap
+        sub[..., 2] *= 1.0 - 0.30 * temp * wmap
+    if tint:
+        sub[..., 1] *= 1.0 - 0.20 * tint * wmap
+
+    # 3. Neblina: quitarla en la zona (o anadirla, en negativo)
+    dh = a.get("dehaze", 0.0) / 100.0
+    if dh:
+        if dh > 0:
+            small = cv2.resize(sub, None, fx=0.25, fy=0.25,
+                               interpolation=cv2.INTER_AREA)
+            dark = cv2.GaussianBlur(small.min(axis=-1), (0, 0), 15 * 0.25)
+            dark = cv2.resize(dark, (sub.shape[1], sub.shape[0]),
+                              interpolation=cv2.INTER_LINEAR)
+            t = np.clip(dh * 0.7 * dark, 0.0, 0.9)[..., None]
+            out = np.clip((sub - t) / (1.0 - t), 0.0, 1.0)
+        else:
+            k = -dh * 0.5
+            out = sub * (1.0 - k) + k
+        out -= sub
+        out *= wc
+        sub += out
+
+    # 4. Color
+    s = a.get("saturation", 0.0) / 100.0
+    vib = a.get("vibrance", 0.0) / 100.0
+    if s or vib:
+        lum = _luminance(sub)[..., None]
+        factor = 1.0 + s
+        if vib:
+            current = sub.max(-1) - sub.min(-1)
+            factor = factor + vib * (1.0 - np.clip(current * 2.0, 0.0, 1.0))
+            factor = factor[..., None]
+        # lum + (sub - lum) * factor, pero solo lo que marque el peso
+        sub -= lum
+        sub *= 1.0 + (factor - 1.0) * wc
+        sub += lum
+
+    # 5. Detalle (los mismos filtros del panel Detalle, en la zona)
+    clarity = a.get("clarity", 0.0) / 100.0
+    if clarity:
+        lum = _luminance(sub)
+        detail = lum - cv2.GaussianBlur(lum, (0, 0), 30.0)
+        protect = np.clip(1.0 - (2.0 * lum - 1.0) ** 2, 0.0, 1.0)
+        detail *= protect
+        detail *= clarity * 0.6
+        sub += (detail * wmap)[..., None]
+    tex = a.get("texture", 0.0) / 100.0
+    if tex:
+        blur = cv2.GaussianBlur(sub, (0, 0), 4.0)
+        np.subtract(sub, blur, out=blur)
+        blur *= tex * 0.9
+        blur *= wc
+        sub += blur
+    sharp = a.get("sharp_amount", 0.0) / 100.0
+    if sharp:
+        high = sub - cv2.GaussianBlur(sub, (0, 0), 1.0)
+        high *= sharp * 1.2
+        high *= wc
+        sub += high
+
+    np.clip(sub, 0.0, 1.0, out=sub)
+
+
+def _apply_masks(img, e, ai_masks=None, region=None):
     """Ajustes locales: cada mascara aplica su receta pesada por su mapa."""
     todo = [m for m in (e.get("masks") or [])
             if any((m.get("adjust") or {}).get(k) for k in MASK_ADJUST_KEYS)]
     if not todo:
         return img
     h, w = img.shape[:2]
+    img = np.ascontiguousarray(img)
+    # Sin region, el trozo ES la foto entera. Con ella, las mascaras se
+    # calculan al tamano de la foto completa y se recorta el pedazo que
+    # toca: sus coordenadas van de 0 a 1 sobre la foto, no sobre el trozo
+    gh, gw, oy, ox = region if region else (h, w, 0, 0)
 
     def get_ai(kind):
         m0 = ai_source_map(ai_masks, kind)
-        return None if m0 is None else transform_ai_map(m0, e, h, w)
+        return None if m0 is None else transform_ai_map(m0, e, gh, gw)
 
     for m in todo:
-        wmap = mask_weight(m, h, w, get_ai)
+        wmap = mask_weight(m, gh, gw, get_ai)
         if wmap is None:
             continue  # mascara IA sin su mapa calculado todavia
-        a = m.get("adjust") or {}
-        wc = wmap[..., None]
-        ev = a.get("exposure", 0.0)
-        if ev:
-            img = img * np.power(2.0, ev * wmap)[..., None]
-        temp = a.get("temperature", 0.0) / 100.0
-        tint = a.get("tint", 0.0) / 100.0
-        if temp:
-            img[..., 0] *= 1.0 + 0.30 * temp * wmap
-            img[..., 2] *= 1.0 - 0.30 * temp * wmap
-        if tint:
-            img[..., 1] *= 1.0 - 0.20 * tint * wmap
-        sh = a.get("shadows", 0.0) / 100.0
-        hi = a.get("highlights", 0.0) / 100.0
-        if sh or hi:
-            lum = np.clip(_luminance(img), 0.0, 1.0)
-            if sh:
-                mask = (1.0 - lum) ** 2
-                black_ramp = np.clip(lum / 0.15, 0.0, 1.0)
-                mask *= black_ramp
-                img += (sh * 0.50) * (mask * wmap)[..., None]
-            if hi:
-                img *= 1.0 + (hi * 0.55) * (lum ** 2 * wmap)[..., None]
-        c = a.get("contrast", 0.0) / 100.0
-        if c:
-            img = img + (img - 0.5) * (0.8 * c) * wc
-        s = a.get("saturation", 0.0) / 100.0
-        if s:
-            lum = _luminance(img)[..., None]
-            img = lum + (img - lum) * (1.0 + s * wc)
-        img = np.clip(img, 0.0, 1.0)
+        if region:
+            wmap = np.ascontiguousarray(wmap[oy:oy + h, ox:ox + w])
+        box = _mask_box(wmap)
+        if box is None:
+            continue  # mascara vacia (invertida sobre si misma, sin trazos...)
+        y0, y1, x0, x1 = box
+        _mask_recipe(img[y0:y1, x0:x1], wmap[y0:y1, x0:x1],
+                     m.get("adjust") or {})
     return img
 
 
@@ -976,29 +1185,135 @@ def _apply_hsl(img, e):
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
 
-def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=False):
+def detail_geometry(full, edits):
+    """La foto entera a resolucion completa, ya recortada y girada."""
+    return _apply_geometry(full, {**DEFAULT_EDITS, **edits})
+
+
+def detail_stats(geo, edits, is_raw=False):
+    """Medidas que solo tienen sentido mirando la foto ENTERA.
+
+    Dos pasos del revelado no son locales: el arreglo automatico de
+    exposicion y el mapeo tonal miran el brillo medio de toda la foto para
+    decidir cuanto levantarla. Si cada trozo se midiera a si mismo, no
+    pegarian entre ellos. Se calcula una vez, sobre la foto reducida (son
+    promedios: no hace falta la resolucion completa), y se le pasa a cada
+    trozo. Devuelve un diccionario para `apply_edits(stats=...)`."""
+    e = {**DEFAULT_EDITS, **edits}
+    img = geo
+    out = {}
+    profile = PROFILE_ALIASES.get(e.get("profile", "standard"),
+                                  e.get("profile", "standard"))
+    if is_raw and profile != RAW_PROFILE:
+        out["auto_w"] = auto_tone_weight(img)
+        out["auto_log"] = log_avg_luminance(img)
+        img = auto_tone(img.copy(), weight=out["auto_w"],
+                        log_avg=out["auto_log"])
+        img = _apply_profile(img, profile)
+    if e.get("tone_map", 0.0) > 0:
+        out["tm_log"] = log_avg_luminance(_apply_calibration(img, e))
+    return out
+
+
+# Margen que se revela de mas alrededor del trozo y luego se tira. Los filtros
+# de radio (claridad mira a 30 px, enfoque, ruido) necesitan ver mas alla del
+# borde; sin esto se notaria una linea justo donde acaba el trozo.
+DETAIL_MARGIN = 64
+
+
+def render_detail(geo, edits, box, is_raw=False, ai_masks=None,
+                  stats=None, should_stop=None, margin=DETAIL_MARGIN):
+    """Revela a resolucion completa SOLO el trozo que se esta mirando.
+
+    `geo` es la foto completa ya pasada por `detail_geometry`, y `box` es el
+    rectangulo visible (x0, y0, x1, y1) en coordenadas 0..1 sobre ella. Se
+    revela ese trozo con un margen extra que se descarta al final.
+
+    Devuelve (imagen uint8 del trozo, (x0, y0, x1, y1) en pixeles de `geo`),
+    o None si el rectangulo se queda en nada."""
+    gh, gw = geo.shape[:2]
+    x0 = int(np.clip(box[0], 0.0, 1.0) * gw)
+    y0 = int(np.clip(box[1], 0.0, 1.0) * gh)
+    x1 = int(np.ceil(np.clip(box[2], 0.0, 1.0) * gw))
+    y1 = int(np.ceil(np.clip(box[3], 0.0, 1.0) * gh))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    # trozo ampliado con el margen (recortado contra los bordes de la foto)
+    mx0, my0 = max(x0 - margin, 0), max(y0 - margin, 0)
+    mx1, my1 = min(x1 + margin, gw), min(y1 + margin, gh)
+    sub = np.ascontiguousarray(geo[my0:my1, mx0:mx1])
+
+    out = apply_edits(sub, edits, ai_masks=ai_masks, is_raw=is_raw,
+                      should_stop=should_stop, region=(gh, gw, my0, mx0),
+                      stats=stats)
+    # fuera el margen: se revelo solo para que los filtros vieran el entorno
+    out = out[y0 - my0:y0 - my0 + (y1 - y0), x0 - mx0:x0 - mx0 + (x1 - x0)]
+    return np.ascontiguousarray(out), (x0, y0, x1, y1)
+
+
+class Stale(Exception):
+    """Este revelado ya no vale: mientras se calculaba, has vuelto a mover
+    algo y hay uno mas nuevo esperando."""
+
+
+def _check(stop):
+    """Punto de control: suelta el trabajo si el resultado ya no sirve.
+
+    Un revelado de calidad son varias decimas de segundo (en una foto con
+    enfoque, claridad y HSL puestos, mas de un segundo). Sin estos cortes,
+    mover un ajuste mientras uno esta en marcha obligaba a esperar a que
+    terminase entero... para tirarlo a la basura al llegar, porque ya habia
+    quedado viejo. Ahora se abandona en el primer control."""
+    if stop is not None and stop():
+        raise Stale()
+
+
+def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None,
+                is_raw=False, should_stop=None, region=None, stats=None):
     """base: float32 RGB en rango 0..1. Devuelve uint8 RGB listo para mostrar.
     `ai_masks`: mapas de segmentacion IA pre-geometria, p. ej. {"subject": m}.
     `denoised` / `faced`: resultados IA pre-geometria (misma forma que base),
-    para las mascaras con ruido IA / rostros IA locales."""
+    para las mascaras con ruido IA / rostros IA locales.
+    `should_stop`: funcion que, si devuelve True, aborta con `Stale`.
+    `region`: (alto, ancho, y0, x0) de la foto entera cuando `base` es solo
+    un trozo de ella (vista de detalle). El que llama ya le ha aplicado la
+    geometria; aqui sirve para que las mascaras caigan donde deben.
+    `stats`: medidas tomadas sobre la foto ENTERA (ver `detail_stats`), para
+    que un trozo se revele igual que si fuera parte de ella."""
     e = {**DEFAULT_EDITS, **edits}
-    img = _apply_geometry(base, e)
+    st = stats or {}
+    if region is None:
+        img = _apply_geometry(base, e)
+    else:
+        # el trozo ya llega recortado y girado (lo hizo `render_detail` sobre
+        # la foto entera). Aqui NO se puede reutilizar la bandera
+        # `_skip_geometry`: `transform_ai_map` la leeria y dejaria los mapas
+        # de IA sin girar, descuadrados respecto al trozo
+        img = np.ascontiguousarray(base)
+        if np.may_share_memory(img, base):
+            img = img.copy()   # apply_edits pinta encima; nunca sobre la base
     if denoised is not None or faced is not None:
         img = _blend_ai_masked(img, e, ai_masks, denoised, faced, base)
+    _check(should_stop)
 
     # Perfil base y calibracion de camara: primero, definen el punto
     # de partida sobre el que actua todo lo demas
-    # Solo se aplica a RAW (JPEGs ya tienen el procesamiento de camara)
-    if is_raw:
-        img = auto_tone(img)
-        img = _apply_profile(img, e.get("profile", "standard"))
+    # Solo se aplica a RAW (JPEGs ya tienen el procesamiento de camara), y
+    # con el perfil "RAW" tampoco: ese pide el archivo sin interpretar
+    profile = e.get("profile", "standard")
+    profile = PROFILE_ALIASES.get(profile, profile)
+    if is_raw and profile != RAW_PROFILE:
+        img = auto_tone(img, weight=st.get("auto_w"),
+                        log_avg=st.get("auto_log"))
+        img = _apply_profile(img, profile)
     img = _apply_calibration(img, e)
+    _check(should_stop)
 
     # Mapeo tonal adaptativo: comprime el rango dinamico del RAW de forma
     # inteligente, preservando contraste local (como Lightroom / Capture One)
     tm = e.get("tone_map", 0.0) / 100.0
     if tm > 0:
-        img = img * (1.0 - tm) + tone_mapping(img) * tm
+        img = img * (1.0 - tm) + tone_mapping(img, log_avg=st.get("tm_log")) * tm
 
     # Balance de blancos (temperatura / matiz)
     temp = e["temperature"] / 100.0
@@ -1021,8 +1336,32 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
     )
     # la misma curva para los tres canales: se lee la tabla de una pasada en
     # vez de canal a canal (leer `idx[..., c]` va salteado por la memoria)
-    img = tone_lut[_lut_index(img)]
-    np.clip(img, 0.0, 1.0, out=img)
+    if e["shadows"] > 0 or e["highlights"] < 0:
+        # Recuperar sombras (o luces) por canal DESTINE el color. Un rojo
+        # oscuro (0,10 / 0,02 / 0,02) tiene sus canales en proporcion 5:1;
+        # al pasarlos por la misma curva se acercan entre si y la proporcion
+        # cae a 2,5:1 — el rojo se vuelve gris claro. Medido en una foto real:
+        # levantar sombras a tope se comia el 30 % del color de esas zonas, y
+        # eso es la mitad de la sensacion de "sombra pintada de gris".
+        #
+        # La cura: junto a la version por canal se calcula otra que sube el
+        # brillo conservando la proporcion exacta entre canales, y se mezclan.
+        # Solo por canal desaturaria; solo por proporcion satura de mas y se
+        # sale de gama en las zonas muy levantadas. A medias queda natural.
+        lum_antes = _luminance(img)
+        curvada = tone_lut[_lut_index(img)]
+        lum_despues = _luminance(curvada)
+        ganancia = lum_despues / np.maximum(lum_antes, 1e-4)
+        # la correccion solo actua donde de verdad se ha levantado el tono
+        peso = np.clip(ganancia - 1.0, 0.0, 1.0) * 0.5
+        proporcional = np.clip(img * ganancia[..., None], 0.0, 1.0)
+        img = curvada + (proporcional - curvada) * peso[..., None]
+        np.clip(img, 0.0, 1.0, out=img)
+    else:
+        img = tone_lut[_lut_index(img)]
+        np.clip(img, 0.0, 1.0, out=img)
+
+    _check(should_stop)
 
     # Borrar neblina (dehaze)
     dh = e["dehaze"] / 100.0
@@ -1040,12 +1379,16 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         a = -dh * 0.5
         img = img * (1.0 - a) + a  # añade neblina (mezcla hacia blanco)
 
+    _check(should_stop)
+
     # Contraste adaptativo local (CLAHE): mejora el contraste en sombras
     # e iluminaciones sin lavar la imagen general
     ac = e.get("adaptive_contrast", 0.0) / 100.0
     if ac > 0:
         # CLAHE con intensidad variable: suave (clip_limit 2.0) a fuerte (4.0)
         img = img * (1.0 - ac) + adaptive_contrast(img, clip_limit=2.0 + ac * 2.0) * ac
+
+    _check(should_stop)
 
     # Curva de tonos (parametrica + puntos + por canal), por indexado directo
     luts = _build_channel_luts(e)
@@ -1071,11 +1414,15 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         img += lum
         np.clip(img, 0.0, 1.0, out=img)
 
+    _check(should_stop)
+
     # Mezclador HSL y color de punto
     img = _apply_hsl(img, e)
+    _check(should_stop)
 
     # Mascaras con ajustes locales (degradados, pincel, sujeto/fondo IA)
-    img = _apply_masks(img, e, ai_masks)
+    img = _apply_masks(img, e, ai_masks, region)
+    _check(should_stop)
 
     # Vista previa de la mascara de enfoque (Alt sobre el deslizador Mascara):
     # blanco = zonas que reciben enfoque, negro = protegidas
@@ -1087,9 +1434,15 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
 
     # En el borrador de edicion rapida se omiten los efectos de detalle
     # (ruido, textura, enfoque, grano): no se aprecian mientras se arrastra
-    # un ajuste tonal y cuestan la mitad del render
-    if e.get("_draft_skip_detail"):
+    # un ajuste tonal y cuestan la mitad del render. Los creativos SI se
+    # calculan siempre: son el efecto que estas mirando, saltarselos haria
+    # que la foto cambiara de aspecto al soltar el raton.
+    draft = bool(e.get("_draft_skip_detail"))
+    if draft:
+        img = _apply_creative(img, e, should_stop, region)
         return (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+    _check(should_stop)
 
     # Reduccion de ruido (antes del enfoque, como debe ser)
     nl = e["nr_luminance"] / 100.0
@@ -1106,6 +1459,8 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
             ycc[..., 1] = cv2.GaussianBlur(ycc[..., 1], (0, 0), sigma)
             ycc[..., 2] = cv2.GaussianBlur(ycc[..., 2], (0, 0), sigma)
         img = np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0.0, 1.0)
+
+    _check(should_stop)
 
     # Claridad: contraste local de radio grande, solo en medios tonos
     # (protege sombras y luces puras para no ensuciar negros/blancos, como
@@ -1129,14 +1484,22 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         img += blur
         np.clip(img, 0.0, 1.0, out=img)
 
+    _check(should_stop)
+
     # Enfoque: cantidad / radio / detalle / mascara
     if e["sharp_amount"]:
         amount = e["sharp_amount"] / 100.0 * 1.2
         sigma = max(float(e["sharp_radius"]), 0.3)
         high = img - cv2.GaussianBlur(img, (0, 0), sigma)
-        # Detalle bajo = solo bordes fuertes (evita amplificar el ruido fino)
+        # Detalle bajo = solo bordes fuertes (evita amplificar el ruido fino).
+        # El umbral se resta al alto-paso, asi que hay que medirlo contra lo
+        # que de verdad mide el detalle fino de una foto: la mitad de los
+        # pixeles no llegan a 2 niveles sobre 255. La constante estaba en
+        # 0.03 (7,6 niveles): se comia el 89% del enfoque con el Detalle de
+        # fabrica y por eso "enfocar" casi no se notaba. A 0.012 el tope son
+        # 3 niveles, que sigue frenando el ruido sin borrar la textura.
         detail = e["sharp_detail"] / 100.0
-        thr = (1.0 - detail) ** 2 * 0.03
+        thr = (1.0 - detail) ** 2 * 0.012
         if thr > 0:
             high = np.sign(high) * np.maximum(np.abs(high) - thr, 0.0)
         # Mascara: limita el enfoque a las zonas con bordes
@@ -1147,13 +1510,258 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         img += high
         np.clip(img, 0.0, 1.0, out=img)
 
+    img = _apply_creative(img, e, should_stop, region)
+
+    img *= 255.0
+    img += 0.5
+    return img.astype(np.uint8)
+
+
+# Estado de animo: cada receta es una interpretacion de color completa, del
+# tipo que en cine se llama "look". Se define con la ganancia y la gamma de
+# cada canal (rojo, verde, azul) mas un empujon de saturacion: la ganancia
+# tine sobre todo las luces y la gamma sobre todo los medios y las sombras.
+MOOD_RECIPES = {
+    "none":     None,
+    "warm":     ((1.07, 1.01, 0.93), (0.97, 1.00, 1.05), 1.06),
+    "cool":     ((0.94, 1.00, 1.09), (1.05, 1.01, 0.96), 1.02),
+    "cine":     ((1.05, 1.00, 0.95), (1.04, 1.00, 0.93), 1.10),
+    "sepia":    ((1.10, 1.00, 0.84), (0.95, 1.00, 1.10), 0.45),
+    "forest":   ((0.93, 1.04, 0.97), (1.06, 0.96, 1.02), 1.08),
+    "sunset":   ((1.12, 0.98, 0.88), (0.94, 1.02, 1.08), 1.12),
+    "night":    ((0.92, 0.97, 1.12), (1.10, 1.04, 0.94), 0.88),
+}
+
+GLOW_MODES = ("soft_focus", "glow", "orton", "orton_soft")
+
+
+def _blur_rel(img, sigma, region=None):
+    """Difuminado con radio relativo al tamano de la foto.
+
+    Un radio fijo en pixeles daria un efecto distinto en la vista previa que
+    en el archivo exportado (que tiene el doble de lado). Aqui 'sigma' es el
+    radio a 2200 px de lado y se escala solo, igual que hace el grano."""
+    h, w = img.shape[:2]
+    gh, gw = region[:2] if region else (h, w)
+    s = max(sigma * max(gh, gw) / 2200.0, 0.3)
+    return cv2.GaussianBlur(img, (0, 0), s)
+
+
+def _dramatic(img, e, region):
+    """Look dramatico: contraste local fuerte y color contenido.
+
+    Es el 'Dramatico' de Luminar: saca la textura de las nubes, la piedra o
+    la piel curtida subiendo el contraste de radio medio y bajando un poco el
+    color, que es lo que le da ese aire duro de reportaje."""
+    amt = e["dramatic_amount"] / 100.0
+    extra = e["dramatic_contrast"] / 100.0
+    bright = e["dramatic_brightness"] / 100.0
+    sat = e["dramatic_saturation"] / 100.0
+    if not (amt or extra or bright or sat):
+        return img
+    if amt or extra:
+        lum = _luminance(img)
+        # dos radios: uno amplio que da cuerpo y otro corto que saca textura
+        detail = lum - _blur_rel(lum, 24.0, region)
+        boost = detail * (amt * 1.1)
+        if extra:
+            fino = lum - _blur_rel(lum, 6.0, region)
+            boost = boost + fino * (extra * 0.9)
+        img += boost[..., None]
+        if amt:
+            # curva en S suave: mas cuerpo sin cerrar los negros del todo
+            img += (img - 0.5) * (0.30 * amt)
+        np.clip(img, 0.0, 1.0, out=img)
+    if bright:
+        img += bright * 0.18
+        np.clip(img, 0.0, 1.0, out=img)
+    # el dramatico desatura por su cuenta; el deslizador lo corrige a gusto
+    total_sat = sat - 0.35 * amt
+    if total_sat:
+        lum = _luminance(img)[..., None]
+        img -= lum
+        img *= 1.0 + total_sat
+        img += lum
+        np.clip(img, 0.0, 1.0, out=img)
+    return img
+
+
+def _mood(img, e):
+    """Estado de animo: la receta de color elegida, mezclada a gusto."""
+    recipe = MOOD_RECIPES.get(e.get("mood_preset", "none"))
+    amt = e["mood_amount"] / 100.0
+    if recipe is None or amt <= 0:
+        return img
+    gain, gamma, sat = recipe
+    # una tabla por canal: gamma primero (medios y sombras), ganancia despues
+    x = np.linspace(0.0, 1.0, LUT_N, dtype=np.float32)
+    luts = []
+    for c in range(3):
+        curva = np.clip(np.power(x, gamma[c]) * gain[c], 0.0, 1.0)
+        luts.append((1.0 - amt) * x + amt * curva)   # mezcla con el original
+    idx = _lut_index(img)
+    for c in range(3):
+        img[..., c] = luts[c][idx[..., c]]
+    if sat != 1.0:
+        s = 1.0 + (sat - 1.0) * amt
+        lum = _luminance(img)[..., None]
+        img -= lum
+        img *= s
+        img += lum
+        np.clip(img, 0.0, 1.0, out=img)
+    return img
+
+
+def _hue_rgb(deg):
+    """Color puro de un tono del circulo cromatico, en RGB 0..1."""
+    hsv = np.array([[[deg / 2.0, 255, 255]]], np.uint8)   # OpenCV: 0..179
+    rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0, 0].astype(np.float32) / 255.0
+    return rgb
+
+
+def _toning(img, e):
+    """Virado: un color en las luces y otro en las sombras.
+
+    El virado de toda la vida (sepia en las luces, frio en las sombras). El
+    equilibrio mueve la frontera entre lo que cuenta como luz y como sombra."""
+    hs = e["tone_hi_sat"] / 100.0
+    ss = e["tone_sh_sat"] / 100.0
+    if not (hs or ss):
+        return img
+    lum = np.clip(_luminance(img), 0.0, 1.0)
+    bal = np.clip(e["tone_balance"] / 100.0, -0.9, 0.9)
+    # el equilibrio desplaza el punto medio: +100 tine mas zona como luz
+    pivot = 0.5 - bal * 0.35
+    hi_w = np.clip((lum - pivot) / max(1.0 - pivot, 1e-3), 0.0, 1.0) ** 1.5
+    sh_w = np.clip((pivot - lum) / max(pivot, 1e-3), 0.0, 1.0) ** 1.5
+    # Se suma SOLO la parte de color del tono, no el color entero: restarle su
+    # propia luminancia lo deja con media cero, asi tine sin cambiar el brillo
+    # ni tapar la foto. (Empujar el pixel hacia el color puro repintaba el
+    # tejado de azul solido en vez de virarlo.)
+    if hs:
+        croma = _hue_rgb(e["tone_hi_hue"])
+        croma = croma - float(croma @ np.array([0.2126, 0.7152, 0.0722],
+                                               np.float32))
+        img += croma * (hi_w * hs * 0.30)[..., None]
+    if ss:
+        croma = _hue_rgb(e["tone_sh_hue"])
+        croma = croma - float(croma @ np.array([0.2126, 0.7152, 0.0722],
+                                               np.float32))
+        img += croma * (sh_w * ss * 0.30)[..., None]
+    np.clip(img, 0.0, 1.0, out=img)
+    return img
+
+
+def _matte(img, e):
+    """Mate: negros levantados y luces recogidas, como una copia antigua.
+
+    Es la curva desvaida del papel viejo o del cine en Super 8: el negro deja
+    de ser negro y la foto pierde el punto duro."""
+    amt = e["matte_amount"] / 100.0
+    if amt <= 0:
+        return img
+    fade = e["matte_fade"] / 100.0
+    contrast = e["matte_contrast"] / 100.0
+    lift = 0.16 * fade * amt        # suelo nuevo del negro
+    roll = 0.06 * amt               # techo, un poco por debajo del blanco
+    img *= (1.0 - lift - roll)
+    img += lift
+    if contrast:
+        img += (img - (lift + (1.0 - roll)) * 0.5) * (0.5 * contrast)
+    np.clip(img, 0.0, 1.0, out=img)
+    return img
+
+
+def _mystical(img, e, region):
+    """Mistico: luz difusa de ensueno que se derrama por la foto.
+
+    Las luces se difuminan y se derraman sobre lo que tienen alrededor. Con
+    'Sombras' se controla cuanto invade las zonas oscuras (que es lo que da
+    el aire de niebla) y con 'Suavizado' cuanto detalle fino se lima."""
+    amt = e["mystical_amount"] / 100.0
+    if amt <= 0:
+        return img
+    shadows = e["mystical_shadows"] / 100.0
+    smooth = e["mystical_smooth"] / 100.0
+    soft = _blur_rel(img, 26.0, region)
+    lum = np.clip(_luminance(img), 0.0, 1.0)
+    # por defecto entra sobre todo en las luces; 'Sombras' lo reparte
+    peso = (lum ** 1.5) * (1.0 - shadows) + shadows
+    peso = (peso * amt)[..., None]
+    # mezcla en modo "trama": suma luz sin ensuciar, como un velo luminoso
+    img += (1.0 - img) * soft * peso
+    if smooth:
+        # positivo lima el detalle fino, negativo lo devuelve
+        fino = img - _blur_rel(img, 3.0, region)
+        img -= fino * (smooth * 0.7)
+    np.clip(img, 0.0, 1.0, out=img)
+    return img
+
+
+def _glow(img, e, region):
+    """Brillo: los cuatro clasicos del difuminado.
+
+    - Enfoque suave: la foto difuminada por encima, como una media delante
+      del objetivo. Suaviza la piel sin perder la forma.
+    - Brillo: solo las luces se difuminan y se derraman (halo luminoso).
+    - Efecto Orton: la copia nitida y la difuminada multiplicadas — colores
+      densos, luces que respiran. El clasico de paisaje.
+    - Efecto Orton suave: el mismo con la mano mas ligera."""
+    amt = e["glow_amount"] / 100.0
+    if amt <= 0:
+        return img
+    modo = e.get("glow_mode", "orton")
+    radio = 6.0 + e["glow_smooth"] / 100.0 * 26.0
+    soft = _blur_rel(img, radio, region)
+    if modo == "soft_focus":
+        img += (soft - img) * (amt * 0.85)
+    elif modo == "glow":
+        lum = np.clip(_luminance(soft), 0.0, 1.0)
+        halo = soft * (lum ** 2)[..., None]
+        img += (1.0 - img) * halo * (amt * 0.9)
+    else:
+        # Orton: multiplicar la nitida por la difuminada oscurece y satura;
+        # luego se recupera luz en modo trama para que no se cierre
+        fuerza = amt * (0.55 if modo == "orton_soft" else 0.85)
+        mult = img * soft
+        screen = 1.0 - (1.0 - img) * (1.0 - soft)
+        mezcla = mult * 0.5 + screen * 0.5
+        img += (mezcla - img) * fuerza
+        if modo == "orton":
+            lum = _luminance(img)[..., None]
+            img -= lum
+            img *= 1.0 + 0.15 * amt     # el Orton clasico satura un punto
+            img += lum
+    np.clip(img, 0.0, 1.0, out=img)
+    return img
+
+
+def _apply_creative(img, e, should_stop=None, region=None):
+    """Efectos creativos: los que se VEN mientras los ajustas.
+
+    Van aparte del bloque de detalle porque el borrador rapido tambien los
+    calcula: si el grano desapareciera al arrastrar y volviera al soltar, la
+    foto cambiaria de aspecto delante de tus ojos."""
+    _check(should_stop)
+    img = _dramatic(img, e, region)
+    _check(should_stop)
+    img = _mood(img, e)
+    img = _toning(img, e)
+    img = _matte(img, e)
+    _check(should_stop)
+    img = _mystical(img, e, region)
+    img = _glow(img, e, region)
+    _check(should_stop)
+
     # Grano de pelicula: monocromatico, mas fuerte en tonos medios (como el
     # grano real de negativo), deterministico para que no "hierva" al editar
     if e["grain_amount"]:
         h, w = img.shape[:2]
         # tamano de celda relativo a la resolucion: mismo aspecto en la vista
-        # previa y en la exportacion a resolucion completa
-        rel = max(h, w) / 2200.0
+        # previa y en la exportacion a resolucion completa. En la vista de
+        # detalle manda el tamano de la foto entera, no el del trozo
+        gh, gw = region[:2] if region else (h, w)
+        rel = max(gh, gw) / 2200.0
         cell = max((1.0 + e["grain_size"] / 100.0 * 2.5) * rel, 1.0)
         rng = np.random.default_rng(42)
         gh, gw = max(int(h / cell), 8), max(int(w / cell), 8)
@@ -1172,6 +1780,4 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None, is_raw=Fa
         img += noise[..., None]
         np.clip(img, 0.0, 1.0, out=img)
 
-    img *= 255.0
-    img += 0.5
-    return img.astype(np.uint8)
+    return img

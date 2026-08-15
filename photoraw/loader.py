@@ -71,9 +71,16 @@ def _load_rgb(path, half_size):
     """Devuelve uint8 RGB (o uint16 en RAW y TIFF de 16 bits)."""
     path = Path(path)
     if is_raw(path):
+        from photoraw import dng
+        # Los DNG que fabrica la fusion HDR ya vienen expuestos: son el
+        # resultado que se aprobo en la vista previa. Dejar que LibRaw les
+        # estire el histograma como a un RAW recien salido de la camara los
+        # aclara casi un paso entero (medido en IMG_3621-23: de 93 a 120 de
+        # media), o sea que la foto no se abre como se guardo.
+        propio = dng.es_nuestro(path)
         with rawpy.imread(str(path)) as raw:
             return raw.postprocess(use_camera_wb=True, half_size=half_size,
-                                   output_bps=16, no_auto_bright=False,
+                                   output_bps=16, no_auto_bright=propio,
                                    highlight_mode=rawpy.HighlightMode.Blend)
     tiff16 = _load_tiff16(path)
     if tiff16 is not None:

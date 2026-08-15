@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QMenu, QDialog, QStyledItemDelegate, QStyleOptionViewItem,
     QStyle,
 )
-from PySide6.QtGui import QPen
+from PySide6.QtGui import QPen, QPolygonF
 
 import qtawesome as qta
 
@@ -65,7 +65,7 @@ SLIDER_SECTIONS = [
 
 DETAIL_SECTIONS = [
     ("Enfoque", [
-        ("sharp_amount",  "Cantidad",  0, 150, 1.0),
+        ("sharp_amount",  "Cantidad",  0, 300, 1.0),
         ("sharp_radius",  "Radio",     5, 30, 10.0),
         ("sharp_detail",  "Detalle",   0, 100, 1.0),
         ("sharp_masking", "Máscara",   0, 100, 1.0),
@@ -85,7 +85,60 @@ FACE_SECTIONS = [
     ]),
 ]
 
+# Recetas de color del "Estado de ánimo", en el orden del desplegable
+MOOD_OPTIONS = [
+    ("Ninguno",           "none"),
+    ("Cálido",            "warm"),
+    ("Frío",              "cool"),
+    ("Cine (naranja y azul)", "cine"),
+    ("Sepia",             "sepia"),
+    ("Bosque",            "forest"),
+    ("Atardecer",         "sunset"),
+    ("Nocturno",          "night"),
+]
+
+GLOW_OPTIONS = [
+    ("Enfoque suave",       "soft_focus"),
+    ("Brillo",              "glow"),
+    ("Efecto Orton",        "orton"),
+    ("Efecto Orton suave",  "orton_soft"),
+]
+
+# Efectos creativos, en el mismo orden en que se aplican en el revelado.
+# Una fila que empieza por "@combo" es un desplegable en vez de un deslizador.
 EFFECT_SECTIONS = [
+    ("Dramático", [
+        ("dramatic_amount",     "Cantidad",        0, 100, 1.0),
+        ("dramatic_contrast",   "Contraste local", 0, 100, 1.0),
+        ("dramatic_brightness", "Brillo",       -100, 100, 1.0),
+        ("dramatic_saturation", "Saturación",   -100, 100, 1.0),
+    ]),
+    ("Estado de ánimo", [
+        ("@combo", "mood_preset", "Receta", MOOD_OPTIONS),
+        ("mood_amount", "Cantidad", 0, 100, 1.0),
+    ]),
+    ("Virado", [
+        ("tone_hi_hue",  "Tono luces",      0, 360, 1.0),
+        ("tone_hi_sat",  "Fuerza luces",    0, 100, 1.0),
+        ("tone_sh_hue",  "Tono sombras",    0, 360, 1.0),
+        ("tone_sh_sat",  "Fuerza sombras",  0, 100, 1.0),
+        ("tone_balance", "Equilibrio",   -100, 100, 1.0),
+    ]),
+    ("Mate", [
+        ("matte_amount",   "Cantidad",     0, 100, 1.0),
+        ("matte_fade",     "Desvanecido",  0, 100, 1.0),
+        ("matte_contrast", "Contraste", -100, 100, 1.0),
+    ]),
+    ("Místico", [
+        ("mystical_amount",  "Cantidad",     0, 100, 1.0),
+        ("mystical_shadows", "Sombras",      0, 100, 1.0),
+        ("mystical_smooth",  "Suavizado", -100, 100, 1.0),
+    ]),
+    ("Brillo", [
+        ("@combo", "glow_mode", "Tipo", GLOW_OPTIONS),
+        ("glow_amount", "Cantidad",  0, 100, 1.0),
+        ("glow_smooth", "Suavizado", 0, 100, 1.0),
+    ]),
     ("Grano de película", [
         ("grain_amount", "Cantidad", 0, 100, 1.0),
         ("grain_size",   "Tamaño",   0, 100, 1.0),
@@ -93,20 +146,41 @@ EFFECT_SECTIONS = [
     ]),
 ]
 
-MASK_SLIDERS = [
-    ("exposure",    "Exposición",  -300, 300, 100.0),
-    ("contrast",    "Contraste",   -100, 100, 1.0),
-    ("highlights",  "Luces",       -100, 100, 1.0),
-    ("shadows",     "Sombras",     -100, 100, 1.0),
-    ("temperature", "Temperatura", -100, 100, 1.0),
-    ("tint",        "Matiz",       -100, 100, 1.0),
-    ("saturation",  "Saturación",  -100, 100, 1.0),
-    ("ai_denoise",  "Ruido IA",       0, 100, 1.0),
-    ("ai_face",     "Rostros IA",     0, 100, 1.0),
+# Ajustes que actuan solo dentro de la mascara. Mismos rangos y mismas
+# formulas que el panel general: un +20 de contraste vale lo mismo dentro
+# que fuera.
+MASK_SECTIONS = [
+    ("Luz", [
+        ("exposure",    "Exposición",  -300, 300, 100.0),
+        ("contrast",    "Contraste",   -100, 100, 1.0),
+        ("highlights",  "Luces",       -100, 100, 1.0),
+        ("shadows",     "Sombras",     -100, 100, 1.0),
+        ("whites",      "Blancos",     -100, 100, 1.0),
+        ("blacks",      "Negros",      -100, 100, 1.0),
+    ]),
+    ("Color", [
+        ("temperature", "Temperatura", -100, 100, 1.0),
+        ("tint",        "Matiz",       -100, 100, 1.0),
+        ("saturation",  "Saturación",  -100, 100, 1.0),
+        ("vibrance",    "Vitalidad",   -100, 100, 1.0),
+    ]),
+    ("Detalle", [
+        ("texture",      "Textura",       -100, 100, 1.0),
+        ("clarity",      "Claridad",      -100, 100, 1.0),
+        ("dehaze",       "Borrar neblina", -100, 100, 1.0),
+        ("sharp_amount", "Enfoque",          0, 150, 1.0),
+    ]),
+    ("IA", [
+        ("ai_denoise",  "Ruido IA",       0, 100, 1.0),
+        ("ai_face",     "Rostros IA",     0, 100, 1.0),
+    ]),
 ]
 
+MASK_SLIDERS = [row for _title, rows in MASK_SECTIONS for row in rows]
+
 MASK_TYPE_NAMES = {"linear": "Lineal", "radial": "Radial", "brush": "Pincel",
-                   "subject": "Sujeto IA", "background": "Fondo IA"}
+                   "poly": "Rectángulo", "subject": "Sujeto IA",
+                   "background": "Fondo IA"}
 
 # Mascaras de retrato (face_parse): zonas que se ofrecen en el menu
 FACE_PART_NAMES = [("skin", "Piel"), ("hair", "Cabello"), ("brows", "Cejas"),
@@ -118,7 +192,7 @@ PROFILE_OPTIONS = [
     ("Vívido",             "vivid"),
     ("Retrato",            "portrait"),
     ("Paisaje",            "landscape"),
-    ("Plano (para editar)", "flat"),
+    ("RAW (sin perfil)",   "raw"),
     ("Blanco y negro",     "bw"),
 ]
 
@@ -140,10 +214,12 @@ CAL_SECTIONS = [
     ]),
 ]
 
+# Solo los deslizadores: las filas "@combo" (tipo de brillo, receta de color)
+# no tienen ni rango ni escala y se sincronizan aparte
 SLIDERS = [row for _title, rows in
            SLIDER_SECTIONS + DETAIL_SECTIONS + FACE_SECTIONS + EFFECT_SECTIONS
            + CAL_SECTIONS
-           for row in rows]
+           for row in rows if row[0] != "@combo"]
 
 # Bandas del mezclador HSL: (clave del motor, etiqueta, color de la muestra)
 HSL_BAND_INFO = [
@@ -225,6 +301,22 @@ CURVE_CHANNELS = [
     ("curve_g",   "Verde", "#55c060"),
     ("curve_b",   "Azul",  "#5588e0"),
 ]
+
+# Nombre legible de cada ajuste, para poder ensenar en la ventana de guardado
+# QUE se lleva el preajuste en vez de claves internas
+EDIT_LABELS = {row[0]: row[1]
+               for row in SLIDERS + PARAM_SLIDERS + PC_SLIDERS + CROP_SLIDERS}
+EDIT_LABELS.update({key: f"Curva {lab}" for key, lab, _c in CURVE_CHANNELS})
+EDIT_LABELS.update({f"hsl_{band}_{c}": f"{lab} ({name})"
+                    for band, lab, _col in HSL_BAND_INFO
+                    for c, name in (("h", "tono"), ("s", "saturación"),
+                                    ("l", "luminancia"))})
+EDIT_LABELS.update({
+    "mood_preset": "Receta de color", "glow_mode": "Tipo de brillo",
+    "profile": "Perfil", "masks": "Máscaras", "crop": "Recorte",
+    "rot90": "Giro", "flip_h": "Volteo horizontal",
+    "flip_v": "Volteo vertical", "pc_sample": "Color muestreado",
+})
 
 DARK_STYLE = """
 QMainWindow, QWidget { background: #232323; color: #d8d8d8; font-size: 13px; }
@@ -349,6 +441,10 @@ def np_to_qimage(arr):
 class Signals(QObject):
     thumb_ready = Signal(str, QImage)
     preview_ready = Signal(str, int, QImage, object)
+    # vista de detalle: ruta, gen, imagen del trozo y (x0, y0, ancho, alto)
+    # de la foto completa en la que encaja
+    detail_ready = Signal(str, int, QImage, object)
+    detail_done = Signal()
     render_done = Signal()
     base_ready = Signal(str)
     ai_ready = Signal(str)
@@ -516,7 +612,7 @@ class RenderJob(QRunnable):
     """
 
     def __init__(self, path, base, edits, gen, signals, denoised=None,
-                 faced=None, ai_masks=None, cache_tag=None):
+                 faced=None, ai_masks=None, cache_tag=None, stale=None):
         super().__init__()
         self.path = path
         self.base = base
@@ -527,6 +623,9 @@ class RenderJob(QRunnable):
         self.faced = faced
         self.ai_masks = ai_masks
         self.cache_tag = cache_tag
+        # `stale()` dice si este revelado ya nacio viejo porque has seguido
+        # moviendo ajustes; el motor lo consulta y lo suelta a medio hacer
+        self.stale = stale
 
     def run(self):
         try:
@@ -549,14 +648,61 @@ class RenderJob(QRunnable):
                 base = np.clip(base + (self.faced - self.base) * f_amount, 0.0, 1.0)
             out = engine.apply_edits(base, self.edits, ai_masks=self.ai_masks,
                                      denoised=self.denoised, faced=self.faced,
-                                     is_raw=loader.is_raw(self.path))
+                                     is_raw=loader.is_raw(self.path),
+                                     should_stop=self.stale)
             if key:
                 diskcache.save_result(self.path, key, out)
             self.signals.preview_ready.emit(self.path, self.gen, np_to_qimage(out), out)
+        except engine.Stale:
+            pass   # ya hay uno mas nuevo en camino; este no se pinta
         finally:
             # avisa siempre (incluso si algo falla) para que la fila india
             # de renders no se quede atascada
             self.signals.render_done.emit()
+
+
+class DetailJob(QRunnable):
+    """Revela a resolucion completa el trozo de foto que se esta mirando.
+
+    La vista previa que se edita tiene el lado mayor limitado (2200 px) y el
+    RAW se decodifica a media resolucion: rapido, pero al acercarte estabas
+    viendo esa imagen pequena estirada, y por eso el enfoque y el ruido no se
+    podian juzgar. Este trabajo abre el archivo entero, revela SOLO el
+    rectangulo visible y lo pinta encima. El detalle que ves es real.
+    """
+
+    def __init__(self, path, box, edits, gen, window, is_raw):
+        super().__init__()
+        self.path = path
+        self.box = box          # (x0, y0, x1, y1) en 0..1 sobre la foto
+        self.edits = edits
+        self.gen = gen
+        self.window = window
+        self.is_raw = is_raw
+
+    def run(self):
+        try:
+            geo, stats = self.window.detail_source(self.path, self.edits,
+                                                   self.is_raw)
+            if geo is None or self.window.detail_gen != self.gen:
+                return
+            got = engine.render_detail(
+                geo, self.edits, self.box, is_raw=self.is_raw,
+                ai_masks=self.window.mask_ai_cache.get(self.path),
+                stats=stats,
+                should_stop=lambda: self.window.detail_gen != self.gen)
+            if got is None:
+                return
+            out, (x0, y0, x1, y1) = got
+            self.window.signals.detail_ready.emit(
+                self.path, self.gen, np_to_qimage(out),
+                (x0, y0, geo.shape[1], geo.shape[0]))
+        except engine.Stale:
+            pass   # te has movido: ya viene otro trozo
+        except Exception:
+            pass   # la vista de detalle es un extra: nunca debe tumbar la app
+        finally:
+            self.window.signals.detail_done.emit()
 
 
 class AIJob(QRunnable):
@@ -872,6 +1018,13 @@ class PhotoView(QGraphicsView):
         self._item = QGraphicsPixmapItem()
         self._item.setTransformationMode(Qt.SmoothTransformation)
         self._scene.addItem(self._item)
+        # trozo revelado a resolucion completa, encajado sobre la vista previa
+        # (por debajo de los trazos y del velo de mascara, encima de la foto)
+        self._detail_item = QGraphicsPixmapItem()
+        self._detail_item.setTransformationMode(Qt.SmoothTransformation)
+        self._detail_item.setZValue(0.5)
+        self._detail_item.hide()
+        self._scene.addItem(self._detail_item)
         self._overlay_item = QGraphicsPixmapItem()
         self._overlay_item.setZValue(1)
         self._scene.addItem(self._overlay_item)
@@ -891,8 +1044,13 @@ class PhotoView(QGraphicsView):
         self._mask_ellipse.hide()
         mh_pen = QPen(QColor(20, 20, 20))
         mh_pen.setWidthF(2.0)
+        self._mask_poly = self._scene.addPolygon(QPolygonF(), guide_pen)
+        self._mask_poly.setZValue(2.5)
+        self._mask_poly.hide()
         self._mask_handle_items = {}
-        for name in ("p0", "p1", "c", "l", "r", "t", "b"):
+        # v0..v7: las esquinas del rectangulo/poligono, que se mueven sueltas
+        for name in ("p0", "p1", "c", "l", "r", "t", "b",
+                     "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"):
             it = self._scene.addEllipse(QRectF(-7, -7, 14, 14), mh_pen,
                                         QColor(255, 255, 255))
             it.setFlag(QGraphicsItem.ItemIgnoresTransformations)
@@ -963,7 +1121,51 @@ class PhotoView(QGraphicsView):
         self._fit = True
         self._has_photo = False
 
+    # ---- vista de detalle (pixeles reales al acercarse) ----
+
+    def visible_box(self, pad=0.04):
+        """Rectangulo que se esta viendo, en coordenadas 0..1 de la foto.
+
+        Se pide un poco mas de lo que cabe en pantalla (`pad`) para que un
+        empujoncito con el raton no deje al descubierto la vista previa."""
+        p = self._item.pixmap()
+        if p.isNull() or not p.width():
+            return None
+        r = self.mapToScene(self.viewport().rect()).boundingRect()
+        w, h = float(p.width()), float(p.height())
+        px, py = pad * r.width() / w, pad * r.height() / h
+        box = (max(r.left() / w - px, 0.0), max(r.top() / h - py, 0.0),
+               min(r.right() / w + px, 1.0), min(r.bottom() / h + py, 1.0))
+        if box[2] - box[0] <= 0 or box[3] - box[1] <= 0:
+            return None
+        return box
+
+    def zoom_scale(self):
+        return float(self.transform().m11())
+
+    def set_detail(self, pixmap, x0, y0, full_w, full_h):
+        """Coloca el trozo nitido. (x0, y0) y (full_w, full_h) van en pixeles
+        de la foto completa; la escena mide en pixeles de la vista previa."""
+        p = self._item.pixmap()
+        if p.isNull() or not full_w:
+            return
+        k = full_w / float(p.width())   # cuantos pixeles reales por uno de la vista
+        if k <= 0:
+            return
+        self._detail_item.setPixmap(pixmap)
+        self._detail_item.setScale(1.0 / k)
+        self._detail_item.setPos(x0 / k, y0 / k)
+        self._detail_item.show()
+
+    def clear_detail(self):
+        if self._detail_item.isVisible():
+            self._detail_item.hide()
+            self._detail_item.setPixmap(QPixmap())
+
     def set_photo(self, pixmap, fit=False):
+        # el trozo nitido pertenece al revelado anterior: fuera hasta que
+        # llegue el nuevo, o se quedaria una ventana con la version vieja
+        self.clear_detail()
         self._text.setVisible(False)
         self._item.setVisible(True)
         old_w = self._item.pixmap().width() if self._has_photo else 0
@@ -1052,7 +1254,7 @@ class PhotoView(QGraphicsView):
         Con tiradores activos se desactiva el paneo con la mano, para que
         el arrastre siempre agarre la mascara y no mueva la foto."""
         new = mask if (mask and mask.get("type")
-                       in ("linear", "radial")) else None
+                       in ("linear", "radial", "poly")) else None
         if new is not self._mask_edit:
             # solo se suelta el arrastre si la mascara cambio de verdad;
             # el refresco del velo NO debe cortar el gesto a mitad de camino
@@ -1074,6 +1276,7 @@ class PhotoView(QGraphicsView):
             it.hide()
         self._mask_line.hide()
         self._mask_ellipse.hide()
+        self._mask_poly.hide()
         if m is None or not self._has_photo:
             return
         w = self._item.pixmap().width()
@@ -1089,6 +1292,21 @@ class PhotoView(QGraphicsView):
             self._mask_handle_items["p1"].setPos(x1, y1)
             self._mask_handle_items["p0"].show()
             self._mask_handle_items["p1"].show()
+        elif m["type"] == "poly":
+            pts = m.get("points") or []
+            self._mask_poly.setPolygon(
+                QPolygonF([QPointF(x * w, y * h) for x, y in pts]))
+            self._mask_poly.show()
+            for i, (x, y) in enumerate(pts[:8]):
+                it = self._mask_handle_items[f"v{i}"]
+                it.setPos(x * w, y * h)
+                it.show()
+            # el tirador del centro mueve la mascara entera
+            if pts:
+                self._mask_handle_items["c"].setPos(
+                    sum(x for x, _y in pts) / len(pts) * w,
+                    sum(y for _x, y in pts) / len(pts) * h)
+                self._mask_handle_items["c"].show()
         else:
             cx, cy = m["cx"] * w, m["cy"] * h
             rx, ry = m["rx"] * w, m["ry"] * h
@@ -1124,6 +1342,23 @@ class PhotoView(QGraphicsView):
                 m["x0"], m["y0"] = cl(pos.x() / w), cl(pos.y() / h)
             elif k == "p1":
                 m["x1"], m["y1"] = cl(pos.x() / w), cl(pos.y() / h)
+        elif m["type"] == "poly":
+            pts = m.get("points") or []
+            if k == "c" and pts:
+                # mover la mascara entera: se desplazan todos los puntos a la
+                # vez, y si alguno topa con el borde no se deforma la figura
+                cx = sum(x for x, _y in pts) / len(pts)
+                cy = sum(y for _x, y in pts) / len(pts)
+                dx, dy = pos.x() / w - cx, pos.y() / h - cy
+                dx = max(min(dx, 1.0 - max(x for x, _y in pts)),
+                         -min(x for x, _y in pts))
+                dy = max(min(dy, 1.0 - max(y for _x, y in pts)),
+                         -min(y for _x, y in pts))
+                m["points"] = [[x + dx, y + dy] for x, y in pts]
+            elif k.startswith("v"):
+                i = int(k[1:])
+                if i < len(pts):
+                    pts[i] = [cl(pos.x() / w), cl(pos.y() / h)]
         else:
             if k == "c":
                 m["cx"], m["cy"] = cl(pos.x() / w), cl(pos.y() / h)
@@ -1146,6 +1381,16 @@ class PhotoView(QGraphicsView):
         if self._mask_draw == "linear":
             return {"x0": cl(p0.x() / w), "y0": cl(p0.y() / h),
                     "x1": cl(scene_pos.x() / w), "y1": cl(scene_pos.y() / h)}
+        if self._mask_draw == "poly":
+            # rectangulo de esquina a esquina, como el marco de recorte
+            x0, y0 = cl(p0.x() / w), cl(p0.y() / h)
+            x1, y1 = cl(scene_pos.x() / w), cl(scene_pos.y() / h)
+            if abs(x1 - x0) < 0.01:
+                x1 = cl(x0 + 0.01)
+            if abs(y1 - y0) < 0.01:
+                y1 = cl(y0 + 0.01)
+            return {"points": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                    "feather": 50.0}
         # radial: del centro hacia afuera
         return {"cx": cl(p0.x() / w), "cy": cl(p0.y() / h),
                 "rx": max(abs(scene_pos.x() - p0.x()) / w, 0.02),
@@ -1550,6 +1795,8 @@ class MainWindow(QMainWindow):
         self.signals = Signals()
         self.signals.thumb_ready.connect(self.on_thumb_ready)
         self.signals.preview_ready.connect(self.on_preview_ready)
+        self.signals.detail_ready.connect(self.on_detail_ready)
+        self.signals.detail_done.connect(self._on_detail_done)
         self.signals.render_done.connect(self._on_render_done)
         self.signals.base_ready.connect(self.on_base_ready)
         self.signals.ai_ready.connect(self.on_ai_ready)
@@ -1571,6 +1818,16 @@ class MainWindow(QMainWindow):
         # path -> miniatura del revelado, para las fotos que tienen edicion.
         # La de la camara vive en thumb_pixmaps y no se pisa nunca
         self.edited_thumbs = {}
+        # --- vista de detalle (pixeles reales al acercarse) ---
+        self.detail_gen = 0            # sube con cada peticion; corta las viejas
+        self.detail_busy = False
+        self.detail_pending = False
+        self._detail_full = (None, None)   # (path, foto completa decodificada)
+        self._detail_geo = (None, None, None, None)  # path, firma, geo, medidas
+        self.detail_timer = QTimer(self)
+        self.detail_timer.setSingleShot(True)
+        self.detail_timer.setInterval(220)   # deja terminar el gesto del raton
+        self.detail_timer.timeout.connect(self._start_detail)
         self.base_cache = OrderedDict()   # path -> float32 array
         # path -> revelado ya terminado (huella, ingredientes, QImage, array):
         # volver a una foto que no ha cambiado se pinta sin calcular nada
@@ -1692,6 +1949,13 @@ class MainWindow(QMainWindow):
         self._last_status = ""
         self.preview.zoomChanged.connect(
             lambda s: self.statusBar().showMessage(f"Zoom: {s * 100:.0f} %"))
+        # al acercarse o moverse por la foto hay que traer los pixeles de
+        # verdad de la zona que se esta mirando
+        self.preview.zoomChanged.connect(lambda _s: self._touch_detail())
+        self.preview.horizontalScrollBar().valueChanged.connect(
+            lambda _v: self._touch_detail())
+        self.preview.verticalScrollBar().valueChanged.connect(
+            lambda _v: self._touch_detail())
         self.preview.strokesChanged.connect(self.on_strokes_changed)
         self.preview.colorPicked.connect(self.on_color_picked)
         self.preview.cropChanged.connect(self.on_crop_changed)
@@ -1702,6 +1966,7 @@ class MainWindow(QMainWindow):
 
         self.sliders = {}
         self.value_labels = {}
+        self.effect_combos = {}   # clave -> (desplegable, opciones)
         self._solo_gpu = []   # controles que se apagan sin CUDA
         self._auto_exp_btn = None
         self._auto_exp_active = False
@@ -1717,7 +1982,11 @@ class MainWindow(QMainWindow):
         self.profile_combo.setToolTip(
             "Punto de partida del revelado, antes de tus ajustes:\n"
             "Vívido satura, Retrato cuida la piel, Paisaje realza verdes y\n"
-            "cielos, Plano deja la foto lavada para editarla a tu gusto.")
+            "cielos.\n\n"
+            "RAW (sin perfil) no interpreta nada: te da el archivo tal como\n"
+            "sale de la cámara, sin curva base ni corrección automática de\n"
+            "exposición. Sale más plano y oscuro a propósito — es el punto\n"
+            "de partida para revelar tú desde cero.")
         self.profile_combo.currentIndexChanged.connect(self.on_profile_changed)
         profile_row.addWidget(profile_label)
         profile_row.addWidget(self.profile_combo, 1)
@@ -2023,11 +2292,19 @@ class MainWindow(QMainWindow):
         b_rad = QPushButton(icon("mdi6.circle-outline"), "Radial")
         b_rad.setToolTip("Degradado radial: arrastra del centro hacia afuera")
         b_rad.clicked.connect(lambda: self.start_mask_draw("radial"))
+        b_poly = QPushButton(icon("mdi6.vector-square"), "Rectángulo")
+        b_poly.setToolTip(
+            "Rectángulo: arrastra para dibujarlo.\n"
+            "Luego puedes mover cada esquina por su cuenta, así que también\n"
+            "sirve de trapecio para agarrar una ventana o una puerta que en\n"
+            "la foto salen en perspectiva.")
+        b_poly.clicked.connect(lambda: self.start_mask_draw("poly"))
         self.mask_brush_btn = QPushButton(icon("mdi6.brush"), "Pincel")
         self.mask_brush_btn.setCheckable(True)
         self.mask_brush_btn.setToolTip("Pinta a mano la zona a ajustar")
         self.mask_brush_btn.toggled.connect(self.toggle_mask_brush)
         row1.addWidget(b_lin)
+        row1.addWidget(b_poly)
         row1.addWidget(b_rad)
         row1.addWidget(self.mask_brush_btn)
         v.addLayout(row1)
@@ -2120,30 +2397,42 @@ class MainWindow(QMainWindow):
         feather_row.addWidget(self.mask_feather)
         v.addLayout(feather_row)
 
-        grid = QGridLayout()
-        grid.setVerticalSpacing(8)
         self.mask_sliders = {}
         self.mask_value_labels = {}
-        for row, (key, label, lo, hi, scale) in enumerate(MASK_SLIDERS):
-            lab = QLabel(label)
-            lab.setMinimumWidth(92)
-            slider = NoWheelSlider(Qt.Horizontal)
-            slider.setRange(lo, hi)
-            val = QLabel("0")
-            val.setFixedWidth(42)
-            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            slider.valueChanged.connect(
-                lambda value, k=key, s=scale, wdg=val:
-                self.on_mask_slider(k, value, s, wdg))
-            # mientras se arrastra un ajuste, el velo rojo se aparta solo
-            slider.sliderPressed.connect(self._suspend_mask_overlay)
-            slider.sliderReleased.connect(self._resume_mask_overlay)
-            grid.addWidget(lab, row, 0)
-            grid.addWidget(slider, row, 1)
-            grid.addWidget(val, row, 2)
-            self.mask_sliders[key] = slider
-            self.mask_value_labels[key] = val
-        v.addLayout(grid)
+        for i, (title, rows) in enumerate(MASK_SECTIONS):
+            if i:
+                line = QFrame()
+                line.setFrameShape(QFrame.HLine)
+                line.setStyleSheet(
+                    "color: #3a3a3a; background: #3a3a3a; max-height: 1px;")
+                v.addWidget(line)
+            sec = QLabel(title.upper())
+            sec.setStyleSheet(
+                "color: #8a8a8a; font-size: 11px; font-weight: bold;")
+            v.addWidget(sec)
+            grid = QGridLayout()
+            grid.setVerticalSpacing(8)
+            for row, (key, label, lo, hi, scale) in enumerate(rows):
+                lab = QLabel(label)
+                lab.setMinimumWidth(92)
+                slider = NoWheelSlider(Qt.Horizontal)
+                slider.setRange(lo, hi)
+                slider.default_value = 0   # doble clic = a cero
+                val = QLabel("0")
+                val.setFixedWidth(42)
+                val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                slider.valueChanged.connect(
+                    lambda value, k=key, s=scale, wdg=val:
+                    self.on_mask_slider(k, value, s, wdg))
+                # mientras se arrastra un ajuste, el velo rojo se aparta solo
+                slider.sliderPressed.connect(self._suspend_mask_overlay)
+                slider.sliderReleased.connect(self._resume_mask_overlay)
+                grid.addWidget(lab, row, 0)
+                grid.addWidget(slider, row, 1)
+                grid.addWidget(val, row, 2)
+                self.mask_sliders[key] = slider
+                self.mask_value_labels[key] = val
+            v.addLayout(grid)
         set_slider_gradient(self.mask_sliders["temperature"],
                             ["#3d6fd0", "#93a0b0", "#e8b23a"])
         set_slider_gradient(self.mask_sliders["tint"],
@@ -2294,6 +2583,9 @@ class MainWindow(QMainWindow):
 
     def _add_slider_rows(self, grid, spec, start_row):
         for row, item in enumerate(spec, start=start_row):
+            if item[0] == "@combo":   # desplegable, no deslizador
+                self._add_combo_row(grid, row, item)
+                continue
             if len(item) == 6:
                 key, label, lo, hi, scale, auto = item
             else:
@@ -2329,6 +2621,42 @@ class MainWindow(QMainWindow):
                 self._auto_exp_btn = btn
             self.sliders[key] = slider
             self.value_labels[key] = val
+
+    def _add_combo_row(self, grid, row, item):
+        """Fila de desplegable: el tipo de brillo, la receta de color..."""
+        _tag, key, label, options = item
+        lab = QLabel(label)
+        lab.setMinimumWidth(92)
+        combo = NoWheelCombo()
+        for texto, _valor in options:
+            combo.addItem(texto)
+        combo.currentIndexChanged.connect(
+            lambda i, k=key, o=options: self.on_effect_combo(k, o, i))
+        grid.addWidget(lab, row, 0)
+        grid.addWidget(combo, row, 1, 1, 2)
+        self.effect_combos[key] = (combo, options)
+
+    def on_effect_combo(self, key, options, index):
+        if not self.current_path or index < 0:
+            return
+        valor = options[index][1]
+        if self.current_edits.get(key) == valor:
+            return
+        if self.a_original.isChecked():
+            self.a_original.setChecked(False)   # tocar algo vuelve a la edición
+        self.current_edits[key] = valor
+        self._last_edit_key = key
+        self.store.set(self.current_path, self.current_edits)
+        self._throttle_render()
+
+    def _sync_effect_combos(self):
+        for key, (combo, options) in self.effect_combos.items():
+            valor = self.current_edits.get(key, engine.DEFAULT_EDITS.get(key))
+            claves = [v for _t, v in options]
+            idx = claves.index(valor) if valor in claves else 0
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
 
     def _build_toolbar(self):
         tb = self.addToolBar("Principal")
@@ -2623,6 +2951,13 @@ class MainWindow(QMainWindow):
             self.a_original.blockSignals(True)
             self.a_original.setChecked(False)
             self.a_original.blockSignals(False)
+        # la foto completa de la vista de detalle es de la anterior: 150 MB
+        # que no sirven de nada aqui
+        self.detail_gen += 1
+        self.detail_timer.stop()
+        self.preview.clear_detail()
+        if not self.detail_busy:
+            self._free_detail()
         # el historial de deshacer solo se conserva para la foto activa
         self.heal_undo = {path: self.heal_undo.get(path, [])}
         # las copias reducidas del borrador tambien
@@ -2760,7 +3095,8 @@ class MainWindow(QMainWindow):
         if self.a_original.isChecked():
             # vista "antes": la foto tal cual, sin ajustes ni IA ni recorte
             self._start_render(RenderJob(path, self.base_cache[path], {},
-                                         self.gen, self.signals))
+                                         self.gen, self.signals,
+                                         stale=self._stale_check(self.gen)))
             return
         edits = dict(self.current_edits)
         if self.show_mask:
@@ -2806,7 +3142,121 @@ class MainWindow(QMainWindow):
 
         self._start_render(RenderJob(path, base, edits, self.gen, self.signals,
                                      denoised=den, faced=fac, ai_masks=masks,
-                                     cache_tag=tag))
+                                     cache_tag=tag,
+                                     stale=self._stale_check(self.gen)))
+
+    def _stale_check(self, gen):
+        """Testigo para el hilo de revelado: True cuando ya has pedido otro.
+
+        `self.gen` sube con cada peticion; leerlo desde el hilo es solo mirar
+        un numero. Antes, el revelado viejo se calculaba entero y se tiraba al
+        llegar (on_preview_ready ya lo descartaba); ahora se corta en cuanto
+        pasa por el siguiente punto de control y el hilo queda libre para el
+        nuevo, que es lo que hacia que mover un ajuste de mascara pareciera
+        tardar un segundo."""
+        return lambda: self.gen != gen
+
+    # ---------- vista de detalle: pixeles reales al acercarse ----------
+
+    # Por debajo de 1.0 la vista previa tiene mas pixeles de los que caben en
+    # pantalla y no hay nada que ganar; por encima se esta estirando. Las dos
+    # cifras no son la misma para que el detalle no parpadee al rozar el limite
+    DETAIL_ZOOM_ON = 1.05
+    DETAIL_ZOOM_OFF = 0.95
+
+    def _detail_blocked(self, edits):
+        """Motivo por el que este revelado no se puede reproducir en el trozo,
+        o None si se puede. La IA de ruido y rostros se calcula sobre la vista
+        previa: a resolucion completa no existe, y mezclarla estirada dejaria
+        el trozo mas blando que el resto — justo lo contrario de lo que busca."""
+        if edits.get("ai_denoise") or edits.get("ai_face"):
+            return "ruido o rostros con IA"
+        for m in (edits.get("masks") or []):
+            a = m.get("adjust") or {}
+            if a.get("ai_denoise") or a.get("ai_face"):
+                return "una máscara con IA"
+        return None
+
+    def _touch_detail(self):
+        """Algo ha cambiado (zoom, encuadre o revelado): el trozo que hubiera
+        ya no vale. Se pide otro, pero sin prisa: el temporizador espera a que
+        termines el gesto."""
+        self.detail_gen += 1
+        if self.preview.zoom_scale() < self.DETAIL_ZOOM_OFF:
+            self.detail_timer.stop()
+            self.preview.clear_detail()
+            return
+        self.detail_timer.start()
+
+    def _start_detail(self):
+        path = self.current_path
+        if (not path or path not in self.base_cache
+                or self.preview.zoom_scale() < self.DETAIL_ZOOM_ON):
+            return
+        # las pasadas especiales pintan otra cosa (el velo de la mascara, el
+        # marco de recorte, la foto sin ajustes): ahi el trozo no pega
+        if (self.show_mask or self.crop_mode or self.a_original.isChecked()
+                or self.a_brush.isChecked()):
+            return
+        if self._detail_blocked(self.current_edits):
+            return
+        box = self.preview.visible_box()
+        if box is None:
+            return
+        if self.detail_busy:
+            self.detail_pending = True   # se relanza al terminar el anterior
+            return
+        self.detail_busy = True
+        self.detail_pending = False
+        self.detail_gen += 1
+        self.fast_pool.start(DetailJob(path, box, dict(self.current_edits),
+                                       self.detail_gen, self,
+                                       loader.is_raw(path)))
+
+    def detail_source(self, path, edits, is_raw):
+        """La foto entera a resolucion completa (ya girada y recortada) y sus
+        medidas globales. Se llama desde el hilo del trabajo.
+
+        Se guarda entre peticiones porque abrir el archivo cuesta casi un
+        segundo y al mirar de cerca se piden muchos trozos seguidos. La copia
+        se tira en cuanto cambias de foto o te alejas: son 150 MB por copia."""
+        if self._detail_full[0] != path:
+            self._detail_full = (path, loader.load_full(path))
+        full = self._detail_full[1]
+        if full is None:
+            return None, None
+        # la firma solo lleva lo que cambia el encuadre: mover la exposicion
+        # no obliga a recortar y girar 12 megapixeles otra vez
+        firma = (edits.get("rot90"), edits.get("flip_h"), edits.get("flip_v"),
+                 edits.get("straighten"), tuple(edits.get("crop") or ()),
+                 edits.get("profile"), edits.get("tone_map"))
+        if self._detail_geo[0] != path or self._detail_geo[1] != firma:
+            geo = engine.detail_geometry(full, edits)
+            stats = engine.detail_stats(
+                cv2.resize(geo, None, fx=0.25, fy=0.25,
+                           interpolation=cv2.INTER_AREA),
+                edits, is_raw)
+            self._detail_geo = (path, firma, geo, stats)
+        return self._detail_geo[2], self._detail_geo[3]
+
+    def _free_detail(self):
+        """Suelta los 150 MB (o 300, si hay recorte) de la vista de detalle."""
+        self._detail_full = (None, None)
+        self._detail_geo = (None, None, None, None)
+
+    def on_detail_ready(self, path, gen, image, rect):
+        if gen == self.detail_gen and path == self.current_path:
+            x0, y0, full_w, full_h = rect
+            self.preview.set_detail(QPixmap.fromImage(image), x0, y0,
+                                    full_w, full_h)
+
+    def _on_detail_done(self):
+        self.detail_busy = False
+        if self._detail_full[0] not in (None, self.current_path):
+            self._free_detail()   # cambiaste de foto mientras se revelaba
+        if self.detail_pending:
+            self.detail_pending = False
+            self.detail_timer.start()
 
     def _start_render(self, job):
         """Fila india: si ya hay un render en marcha, este espera su turno.
@@ -3445,6 +3895,9 @@ class MainWindow(QMainWindow):
                 self._store_render(path, image, arr)
             self.preview.set_photo(QPixmap.fromImage(image), fit=self.fit_next)
             self.fit_next = False
+            # el revelado es nuevo: si estabas mirando de cerca, hay que
+            # rehacer tambien el trozo a resolucion completa
+            self._touch_detail()
             if arr is not None:
                 self.histogram.set_image(arr)
             if self.crop_mode:
@@ -3565,11 +4018,16 @@ class MainWindow(QMainWindow):
             self._update_pc_swatch()
         if hasattr(self, "profile_combo"):
             keys = [k for _l, k in PROFILE_OPTIONS]
-            idx = keys.index(self.current_edits.get("profile", "standard")) \
-                if self.current_edits.get("profile", "standard") in keys else 0
+            # el alias deja el menu de acuerdo con lo que se revela de verdad
+            # (una foto guardada con el viejo "Plano" marca ahora RAW)
+            perfil = self.current_edits.get("profile", "standard")
+            perfil = engine.PROFILE_ALIASES.get(perfil, perfil)
+            idx = keys.index(perfil) if perfil in keys else 0
             self.profile_combo.blockSignals(True)
             self.profile_combo.setCurrentIndex(idx)
             self.profile_combo.blockSignals(False)
+        if getattr(self, "effect_combos", None):
+            self._sync_effect_combos()
 
     def _sync_curve_widget(self):
         key, _label, color = CURVE_CHANNELS[self.channel_combo.currentIndex()]
@@ -3719,11 +4177,11 @@ class MainWindow(QMainWindow):
         self.mask_invert.blockSignals(True)
         self.mask_invert.setChecked(bool((m or {}).get("invert")))
         self.mask_invert.blockSignals(False)
-        is_radial = bool(m) and m.get("type") == "radial"
-        self.mask_feather.setEnabled(is_radial)
+        con_feather = bool(m) and m.get("type") in ("radial", "poly")
+        self.mask_feather.setEnabled(con_feather)
         self.mask_feather.blockSignals(True)
         self.mask_feather.setValue(int((m or {}).get("feather", 50.0))
-                                   if is_radial else 50)
+                                   if con_feather else 50)
         self.mask_feather.blockSignals(False)
 
     def on_mask_selected(self, _row):
@@ -4278,15 +4736,22 @@ class MainWindow(QMainWindow):
             return
         self._apply_to_selection(self.copied_edits, "Ajustes pegados")
 
-    def _apply_to_selection(self, edits, message):
+    def _apply_to_selection(self, edits, message, groups=None):
+        """`groups` (preajustes nuevos) limita lo que se toca a esos bloques;
+        sin el se sustituye el revelado entero, que es lo que hacen copiar y
+        pegar ajustes y los preajustes de antes."""
         items = self.film.selectedItems()
         if not items:
             return
         for item in items:
             path = item.data(Qt.UserRole)
-            merged = engine.full_edits(edits)
             # cada foto conserva sus propios trazos del corrector y borrados
             saved = self.store.get(path)
+            if groups is None:
+                merged = engine.full_edits(edits)
+            else:
+                merged = presets.apply_to(engine.full_edits(saved), edits,
+                                          groups)
             merged["heal_strokes"] = saved.get("heal_strokes", [])
             merged["erase_ops"] = saved.get("erase_ops", [])
             self.store.set(path, merged)
@@ -4301,14 +4766,21 @@ class MainWindow(QMainWindow):
 
     def refresh_presets(self):
         self.preset_list.clear()
-        self.preset_list.addItems(presets.list_presets())
+        for name in presets.list_presets():
+            it = QListWidgetItem(name)
+            it.setToolTip(presets.summary(name))   # que se lleva cada uno
+            self.preset_list.addItem(it)
 
     def save_preset(self):
-        name, ok = QInputDialog.getText(self, "Guardar preajuste", "Nombre del preajuste:")
-        if ok and name.strip():
-            presets.save_preset(name.strip(), self.current_edits)
-            self.refresh_presets()
-            self.statusBar().showMessage(f"Preajuste «{name.strip()}» guardado")
+        from photoraw.ui.preset_dialog import PresetSaveDialog
+        dlg = PresetSaveDialog(self.current_edits, EDIT_LABELS, self,
+                               existing=presets.list_presets())
+        if dlg.exec() != QDialog.Accepted:
+            return
+        presets.save_preset(dlg.name, self.current_edits, dlg.groups)
+        self.refresh_presets()
+        self.statusBar().showMessage(
+            f"Preajuste «{dlg.name}» guardado — {presets.summary(dlg.name)}")
 
     def apply_preset(self):
         item = self.preset_list.currentItem()
@@ -4316,7 +4788,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Elige un preajuste de la lista")
             return
         edits = presets.load_preset(item.text())
-        self._apply_to_selection(edits, f"Preajuste «{item.text()}» aplicado")
+        self._apply_to_selection(edits, f"Preajuste «{item.text()}» aplicado",
+                                 groups=presets.load_groups(item.text()))
 
     def delete_preset(self):
         item = self.preset_list.currentItem()
@@ -4403,7 +4876,9 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             try:
                 out, was_reduced = self._fuse_full(group, params, progress, name)
-                dest = hdr.save(out, hdr.output_path(group, self.folder))
+                fmt = params.get("format", hdr.DEFAULT_FORMAT)
+                dest = hdr.save(out, hdr.output_path(group, self.folder, fmt),
+                                fmt)
                 del out
                 done.append(dest)
                 if was_reduced:
