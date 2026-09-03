@@ -455,6 +455,7 @@ class Signals(QObject):
     erase_ready = Signal(str)
     mask_ai_ready = Signal(str)
     face_parse_ready = Signal(str)
+    ai_full_ready = Signal(str)
 
 
 class BusyChip(QWidget):
@@ -820,6 +821,45 @@ class AIDenoiseJob(AIJob):
             result = None
             self.status(f"IA: error — {exc}")
         self.window.on_ai_denoised(str(self.path), result)
+
+
+class AIDenoiseFullJob(QRunnable):
+    """Repite la reduccion de ruido a resolucion completa, en segundo plano,
+    nada mas terminar la vista previa.
+
+    Al exportar hace falta el resultado a resolucion completa (miles de
+    mosaicos, minutos en una GPU y bastante mas en CPU) y la vista previa,
+    reducida para poder editar a tiempo real, no vale como huella. Antes eso
+    se pagaba entero al pulsar Exportar; ahora se adelanta aqui, mientras
+    miras la foto o editas otra cosa, para que Exportar encuentre el
+    resultado ya en el cache de disco y salga al instante.
+
+    Usa el mismo testigo de parada que el resto de la IA: si pulsas
+    Detener, este trabajo se corta igual que los demas."""
+
+    def __init__(self, path, window):
+        super().__init__()
+        self.path = Path(path)
+        self.window = window
+        self.token = window.ai_cancel
+
+    def run(self):
+        try:
+            base = loader.load_full(self.path)
+            key = "den-" + diskcache.result_key(base)
+            if diskcache.load_result(self.path, key) is None:
+                def cb(p):
+                    if self.token["stop"]:
+                        raise ai.Cancelled()
+                    self.window.signals.ai_status.emit(
+                        f"Preparando exportación de {self.path.name}… "
+                        f"{min(int(p * 100), 99)} %")
+                result = ai.denoise(base, progress_cb=cb)
+                diskcache.save_result(self.path, key, result)
+        except Exception:
+            pass   # el Cancelled de Detener y cualquier fallo: ya se
+                   # calculara de nuevo (y visible) al exportar de verdad
+        self.window.signals.ai_full_ready.emit(str(self.path))
 
 
 class HealJob(AIJob):
@@ -1807,6 +1847,7 @@ class MainWindow(QMainWindow):
         self.signals.erase_ready.connect(self.on_erase_ready)
         self.signals.mask_ai_ready.connect(self.on_mask_ai_ready)
         self.signals.face_parse_ready.connect(self.on_face_parse_ready)
+        self.signals.ai_full_ready.connect(self.on_ai_full_denoised)
 
         self.folder = None
         self.store = None
@@ -1837,6 +1878,8 @@ class MainWindow(QMainWindow):
         self._cacheable_gen = None        # su `gen`, si es guardable
         self.ai_cache = OrderedDict()     # path -> vista previa sin ruido (IA)
         self.ai_running = set()
+        self.ai_full_running = set()      # rutas con la IA de exportacion
+                                           # adelantandose en segundo plano
         self.ai_pending_path = None       # foto esperando a que baje el modelo
         self.face_cache = OrderedDict()   # path -> vista previa con rostros IA
         self.face_running = set()
@@ -3337,7 +3380,30 @@ class MainWindow(QMainWindow):
             self.ai_cache[path] = result
             while len(self.ai_cache) > 4:
                 self.ai_cache.popitem(last=False)
+            self._maybe_precompute_full_denoise(path)
         self.signals.ai_ready.emit(path)
+
+    def _maybe_precompute_full_denoise(self, path):
+        """Nada mas terminar la vista previa, adelanta en segundo plano el
+        mismo calculo a resolucion completa (ver AIDenoiseFullJob) para que
+        Exportar no vuelva a esperar los minutos que ya esperaste aqui."""
+        if path != self.current_path or path in self.ai_full_running:
+            return
+        if self.current_edits.get("heal_strokes") or self.current_edits.get("erase_ops"):
+            return   # esos pasos cambian los pixeles de entrada antes del
+                      # ruido IA: la huella de aqui no serviria en Exportar
+        if not ai.model_available():
+            return
+        self.ai_full_running.add(path)
+        self.pool.start(AIDenoiseFullJob(path, self))
+        self._update_busy()
+
+    def on_ai_full_denoised(self, path):
+        # Llamado desde el hilo de IA: la exportacion de esta foto ya tiene
+        # el ruido IA listo en el cache de disco (o se detuvo/fallo, y se
+        # recalculara sin drama al exportar de verdad).
+        self.ai_full_running.discard(path)
+        self._update_busy()
 
     def _on_ai_status(self, msg):
         """Estado de los trabajos en segundo plano: barra inferior + pildora."""
@@ -3351,7 +3417,7 @@ class MainWindow(QMainWindow):
         no se puede detener)."""
         return (self.ai_running or self.face_running or self.heal_running
                 or self.erase_running or self.mask_ai_running
-                or self.face_parse_running)
+                or self.face_parse_running or self.ai_full_running)
 
     def cancel_ai(self):
         """Detiene la IA en marcha: ✕ de la pildora o tecla Esc.
@@ -3378,7 +3444,7 @@ class MainWindow(QMainWindow):
         self.ai_paused = True
         for running in (self.ai_running, self.face_running, self.heal_running,
                         self.erase_running, self.mask_ai_running,
-                        self.face_parse_running):
+                        self.face_parse_running, self.ai_full_running):
             running.clear()
         self._pending_ai_mask = None
         self._pending_face_part = None
