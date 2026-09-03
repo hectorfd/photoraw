@@ -528,10 +528,16 @@ def save(rgb01, dest, fmt=None):
         return dng.save(rgb01, dest)
     data = (np.clip(rgb01, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
     bgr = cv2.cvtColor(data, cv2.COLOR_RGB2BGR)
+    # cv2.imwrite falla en Windows con rutas con tildes o enes sin avisar
+    # (ni excepcion ni False fiable); codificar en memoria y escribir con
+    # Path si funciona con cualquier ruta.
     # 8 = ADOBE_DEFLATE; no todas las compilaciones de OpenCV lo traen
-    if not cv2.imwrite(str(dest), bgr, [cv2.IMWRITE_TIFF_COMPRESSION, 8]):
-        if not cv2.imwrite(str(dest), bgr):
-            raise OSError(f"no se pudo escribir {dest}")
+    ok, buf = cv2.imencode(".tiff", bgr, [cv2.IMWRITE_TIFF_COMPRESSION, 8])
+    if not ok:
+        ok, buf = cv2.imencode(".tiff", bgr)
+    if not ok:
+        raise OSError(f"no se pudo escribir {dest}")
+    dest.write_bytes(buf.tobytes())
     return dest
 
 

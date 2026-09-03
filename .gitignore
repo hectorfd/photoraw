@@ -82,3 +82,8 @@ NOTAS.md
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---- Scripts locales de esta máquina ---------------------------------
+# Atajos de entorno de trabajo (Windows Terminal, rutas fijas...): son
+# de esta máquina, no del proyecto.
+dev.bat

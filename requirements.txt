@@ -13,4 +13,4 @@ pillow-heif>=1.0       # HEIC/HEIF: las fotos de iPhone y Android recientes
 # Herramientas de IA. Con GPU NVIDIA (CUDA) instala 'onnxruntime-gpu'; si no
 # tienes tarjeta compatible, cambia esta linea por 'onnxruntime' y todo
 # funciona igual pero por procesador, mas despacio.
-onnxruntime-gpu>=1.20
+onnxruntime>=1.20

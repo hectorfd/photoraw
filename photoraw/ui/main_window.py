@@ -5199,8 +5199,17 @@ class MainWindow(QMainWindow):
                             progress,
                             f"Superresolución {sr_scale}× en {path.name}…"))
                 dest = out_dir / (path.stem + ".jpg")
-                cv2.imwrite(str(dest), cv2.cvtColor(out, cv2.COLOR_RGB2BGR),
-                            [cv2.IMWRITE_JPEG_QUALITY, 92])
+                # cv2.imwrite falla en Windows con rutas con tildes o enes
+                # (p.ej. "Héctor") sin avisar: no escribe nada y no lanza
+                # excepcion, asi que la exportacion se daba por buena sin
+                # serlo. Codificar en memoria y escribir con Path si
+                # funciona con cualquier ruta.
+                ok, buf = cv2.imencode(
+                    ".jpg", cv2.cvtColor(out, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_JPEG_QUALITY, 92])
+                if not ok:
+                    raise OSError(f"no se pudo generar el JPEG de {path.name}")
+                dest.write_bytes(buf.tobytes())
                 done += 1
             except ai.Cancelled:
                 break    # pulsaste Cancelar mientras trabajaba un modelo
