@@ -327,6 +327,19 @@ def merge_light_map(shots, exps):
     eligiera toma por su cuenta, en una zona donde el verde esta quemado pero
     el rojo no, el pixel saldria con el verde de una toma y el rojo de otra.
     Eso es color inventado — el sillon verde.
+
+    LA CAMPANA DE PESO TIENE QUE SER ESTRECHA, y esto si costo un disgusto
+    real: con una campana ancha, casi toda la zona media de la foto recibe
+    peso de las TRES tomas a la vez (no solo de la mejor expuesta), y
+    "align" solo corrige un desplazamiento entero de camara, no lo que se
+    movio DENTRO de la escena (hojas y flores con viento, gente, el pulso a
+    mano). En cuanto se mezclan tomas que no encajan pixel a pixel el
+    resultado se ve derretido, sin detalle fino, aunque cada toma por
+    separado estuviera nitida (comparar un HDR de un rosal con la toma RAW
+    suelta lo ensena clarisimo). Estrechar la campana hace que casi todo
+    pixel salga de UNA sola toma, la mejor expuesta ahi, y solo se mezcle
+    con otra justo en la franja de transicion donde ninguna domina — igual
+    de nitido que la fusion natural, sin perder rango real.
     """
     t = np.asarray(exps, np.float32)
     t = t / t.max()                      # relativas; la escala absoluta da igual
@@ -335,7 +348,7 @@ def merge_light_map(shots, exps):
     for shot, ti in zip(shots, t):
         top = shot.max(axis=2)           # el canal que antes se quema
         # campana centrada en el gris medio, mirada como la ve el ojo
-        w = np.exp(-12.0 * (np.sqrt(top) - 0.5) ** 2).astype(np.float32)
+        w = np.exp(-32.0 * (np.sqrt(top) - 0.5) ** 2).astype(np.float32)
         w[top > 0.99] = 0.0              # quemado: fuera el pixel entero
         w[top < 0.002] = 0.0             # por debajo de esto solo hay ruido
         acc += (shot / ti) * w[..., None]
