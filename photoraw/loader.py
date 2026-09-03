@@ -6,6 +6,8 @@ import cv2
 import rawpy
 from PIL import Image, ImageOps
 
+from photoraw import lens
+
 # HEIC/HEIF (fotos de iPhone y de moviles Android recientes): registra el
 # decodificador en Pillow para que Image.open los abra como cualquier JPEG
 try:
@@ -68,7 +70,10 @@ def _load_tiff16(path):
 
 
 def _load_rgb(path, half_size):
-    """Devuelve uint8 RGB (o uint16 en RAW y TIFF de 16 bits)."""
+    """Devuelve uint8 RGB (o uint16 en RAW y TIFF de 16 bits), ya con la
+    correccion de lente (distorsion, aberracion cromatica, vineteado)
+    aplicada si la camara y el objetivo estan en la base de datos -- ver
+    `lens.correct`."""
     path = Path(path)
     if is_raw(path):
         from photoraw import dng
@@ -79,12 +84,13 @@ def _load_rgb(path, half_size):
         # media), o sea que la foto no se abre como se guardo.
         propio = dng.es_nuestro(path)
         with rawpy.imread(str(path)) as raw:
-            return raw.postprocess(use_camera_wb=True, half_size=half_size,
-                                   output_bps=16, no_auto_bright=propio,
-                                   highlight_mode=rawpy.HighlightMode.Blend)
+            rgb = raw.postprocess(use_camera_wb=True, half_size=half_size,
+                                  output_bps=16, no_auto_bright=propio,
+                                  highlight_mode=rawpy.HighlightMode.Blend)
+        return lens.correct(rgb, path)
     tiff16 = _load_tiff16(path)
     if tiff16 is not None:
-        return tiff16
+        return lens.correct(tiff16, path)
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)
         # Aplicar perfil ICC embebido (como hace Windows). Las fotos de
@@ -101,7 +107,7 @@ def _load_rgb(path, half_size):
                 im = ImageCms.profileToProfile(im, profile, srgb, outputMode="RGB")
         except Exception:
             pass
-        return np.asarray(im.convert("RGB"))
+        return lens.correct(np.asarray(im.convert("RGB")), path)
 
 
 def _to_float01(rgb):

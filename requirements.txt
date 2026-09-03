@@ -9,6 +9,8 @@ opencv-python>=4.10    # todo el trabajo de imagen del motor de revelado
 numpy>=2.0
 pillow>=11.0           # lectura de EXIF y de imagenes que no son RAW
 pillow-heif>=1.0       # HEIC/HEIF: las fotos de iPhone y Android recientes
+lensfunpy>=1.18        # correccion de lente (distorsion, vineteado, CA);
+                        # trae su propia base de datos de camaras/objetivos
 
 # Herramientas de IA. Con GPU NVIDIA (CUDA) instala 'onnxruntime-gpu'; si no
 # tienes tarjeta compatible, cambia esta linea por 'onnxruntime' y todo

@@ -52,7 +52,7 @@ import numpy as np
 import rawpy
 from PIL import Image
 
-from photoraw import diskcache, loader
+from photoraw import diskcache, lens, loader
 
 NATURAL = "natural"
 HDR = "hdr"
@@ -119,6 +119,10 @@ def load_shot(path, half_size=False, max_side=None, linear=False):
                 # clara se descarta solo al pesar las zonas, y reconstruirlo
                 # aqui solo inventaria color que la toma oscura ya trae bien
                 highlight_mode=rawpy.HighlightMode.Clip)
+        # el DNG que sale de la fusion lleva metadatos propios (ver dng.py),
+        # no la camara/objetivo real: si no se corrige AQUI, sobre cada toma
+        # de origen, el HDR terminado nunca se corrige
+        rgb = lens.correct(rgb, path)
     else:
         rgb = loader._load_rgb(path, half_size=False)
         if linear:

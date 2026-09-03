@@ -2139,7 +2139,9 @@ class MainWindow(QMainWindow):
         preset_box = QGroupBox("Preajustes")
         pv = QVBoxLayout(preset_box)
         self.preset_list = QListWidget()
-        self.preset_list.setMaximumHeight(150)
+        self.preset_list.setWordWrap(True)   # que el resumen quepa entero,
+                                              # no cortado a lo ancho
+        self.preset_list.setMaximumHeight(340)
         self.preset_list.itemDoubleClicked.connect(lambda _: self.apply_preset())
         pv.addWidget(self.preset_list)
         row1 = QHBoxLayout()
@@ -4883,8 +4885,12 @@ class MainWindow(QMainWindow):
     def refresh_presets(self):
         self.preset_list.clear()
         for name in presets.list_presets():
-            it = QListWidgetItem(name)
-            it.setToolTip(presets.summary(name))   # que se lleva cada uno
+            # el resumen de "que lleva" (incluidas las mascaras, si se
+            # guardaron) va en el propio texto, no solo en el tooltip: de un
+            # vistazo, sin pasar el raton por cada uno
+            it = QListWidgetItem(f"{name}\n{presets.summary(name)}")
+            it.setData(Qt.UserRole, name)
+            it.setToolTip(presets.summary(name))
             self.preset_list.addItem(it)
 
     def save_preset(self):
@@ -4903,17 +4909,19 @@ class MainWindow(QMainWindow):
         if not item:
             self.statusBar().showMessage("Elige un preajuste de la lista")
             return
-        edits = presets.load_preset(item.text())
-        self._apply_to_selection(edits, f"Preajuste «{item.text()}» aplicado",
-                                 groups=presets.load_groups(item.text()))
+        name = item.data(Qt.UserRole)
+        edits = presets.load_preset(name)
+        self._apply_to_selection(edits, f"Preajuste «{name}» aplicado",
+                                 groups=presets.load_groups(name))
 
     def delete_preset(self):
         item = self.preset_list.currentItem()
         if not item:
             return
-        if QMessageBox.question(self, "Eliminar", f"¿Eliminar el preajuste «{item.text()}»?") \
+        name = item.data(Qt.UserRole)
+        if QMessageBox.question(self, "Eliminar", f"¿Eliminar el preajuste «{name}»?") \
                 == QMessageBox.Yes:
-            presets.delete_preset(item.text())
+            presets.delete_preset(name)
             self.refresh_presets()
 
     # ---------- fusion HDR (bracketing) ----------
