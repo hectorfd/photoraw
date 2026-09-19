@@ -2147,11 +2147,18 @@ class MainWindow(QMainWindow):
         row1 = QHBoxLayout()
         b_save = QPushButton("Guardar")
         b_save.clicked.connect(self.save_preset)
+        b_update = QPushButton("Actualizar")
+        b_update.setToolTip(
+            "Vuelve a guardar el preajuste seleccionado con los ajustes de "
+            "ahora, con los mismos bloques que ya llevaba (para cambiar "
+            "cuales lleva, usa Guardar con el mismo nombre)")
+        b_update.clicked.connect(self.update_preset)
         b_apply = QPushButton("Aplicar")
         b_apply.clicked.connect(self.apply_preset)
         b_del = QPushButton("Eliminar")
         b_del.clicked.connect(self.delete_preset)
         row1.addWidget(b_save)
+        row1.addWidget(b_update)
         row1.addWidget(b_apply)
         row1.addWidget(b_del)
         pv.addLayout(row1)
@@ -4903,6 +4910,33 @@ class MainWindow(QMainWindow):
         self.refresh_presets()
         self.statusBar().showMessage(
             f"Preajuste «{dlg.name}» guardado — {presets.summary(dlg.name)}")
+
+    def update_preset(self):
+        """Vuelve a guardar el preajuste seleccionado con los ajustes
+        actuales, con los mismos bloques que ya llevaba -- sin volver a
+        escribir el nombre ni marcar de nuevo las casillas. Para cambiar QUE
+        bloques lleva, se usa Guardar con ese mismo nombre (el dialogo
+        avisa y deja reelegir)."""
+        item = self.preset_list.currentItem()
+        if not item:
+            self.statusBar().showMessage(
+                "Elige un preajuste de la lista para actualizarlo")
+            return
+        name = item.data(Qt.UserRole)
+        groups = presets.load_groups(name)
+        if groups is None:   # preajuste antiguo: se guardaba entero
+            groups = presets.ALL_GROUPS
+        presets.save_preset(name, self.current_edits, groups)
+        self.refresh_presets()
+        # reseleccionar: si vas a ir ajustando y actualizando varias veces
+        # seguidas, que no toque volver a elegirlo de la lista cada vez
+        for i in range(self.preset_list.count()):
+            it = self.preset_list.item(i)
+            if it.data(Qt.UserRole) == name:
+                self.preset_list.setCurrentItem(it)
+                break
+        self.statusBar().showMessage(
+            f"Preajuste «{name}» actualizado — {presets.summary(name)}")
 
     def apply_preset(self):
         item = self.preset_list.currentItem()
