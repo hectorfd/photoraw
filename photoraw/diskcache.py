@@ -139,7 +139,8 @@ def load_preview(path, max_side=2200):
     # El sufijo "icc" invalida las vistas previas de JPG/HEIC guardadas antes
     # de que la conversion de perfil de color funcionara. Los RAW no pasan por
     # ese camino, asi que conservan su cache (decodificarlos de nuevo es lento)
-    kind = f"prev{max_side}16" if loader.is_raw(path) else f"prev{max_side}16icc"
+    # "be": los RAW ya no usan el auto-brillo de LibRaw (ver loader)
+    kind = f"prev{max_side}16be2" if loader.is_raw(path) else f"prev{max_side}16icc"
     entry = _entry(path, kind, "npy")
     if entry is not None and entry.exists():
         try:

@@ -8,7 +8,8 @@ import cv2
 import numpy as np
 from PySide6.QtCore import (Qt, QObject, QRunnable, QThreadPool, QTimer,
                             Signal, QSize, QPointF, QRectF)
-from PySide6.QtGui import QAction, QImage, QPixmap, QIcon, QKeySequence, QColor, QPainter
+from PySide6.QtGui import (QAction, QImage, QPixmap, QIcon, QKeySequence,
+                           QColor, QPainter, QShortcut)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QSlider, QListWidget,
     QListWidgetItem, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
     QFrame, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QGraphicsEllipseItem, QGraphicsItem, QProgressBar, QStackedWidget,
     QCheckBox, QMenu, QDialog, QStyledItemDelegate, QStyleOptionViewItem,
-    QStyle,
+    QStyle, QLineEdit,
 )
 from PySide6.QtGui import QPen, QPolygonF
 
@@ -25,7 +26,7 @@ import qtawesome as qta
 
 from photoraw import (ai, diskcache, engine, face_parse, faces, generative,
                       hardware, hdr, heal, loader, masks_ai, presets, upscale)
-from photoraw import ajustes
+from photoraw import ajustes, wb
 from photoraw.edits import EditStore
 from photoraw.ui.curve_widget import CurveWidget, HistogramWidget
 
@@ -36,6 +37,44 @@ def icon(name, color="#d8d8d8"):
     """Icono Material Design en el tono claro del tema."""
     return qta.icon(name, color=color, color_active="#ffffff",
                     color_disabled="#5a5a5a")
+
+class PresetDelegate(QStyledItemDelegate):
+    """Fila compacta de preajuste: el nombre en negrita y debajo, en gris y
+    en UNA linea, que lleva. Con el resumen entero cada preajuste ocupaba
+    seis o siete lineas; el detalle completo esta en el tooltip."""
+    ALTO = 46
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.ALTO)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        r = option.rect
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(r, QColor("#2f5d8a"))
+        elif option.state & QStyle.State_MouseOver:
+            painter.fillRect(r, QColor("#2a2a2a"))
+        painter.setPen(QColor("#2c2c2c"))
+        painter.drawLine(r.left(), r.bottom(), r.right(), r.bottom())
+        texto = r.adjusted(8, 5, -8, -5)
+        f = option.font
+        f.setBold(True)
+        painter.setFont(f)
+        painter.setPen(QColor("#ededed"))
+        fm = painter.fontMetrics()
+        painter.drawText(texto.left(), texto.top() + fm.ascent(),
+                         fm.elidedText(index.data(Qt.DisplayRole) or "",
+                                       Qt.ElideRight, texto.width()))
+        f.setBold(False)
+        f.setPointSizeF(max(f.pointSizeF() - 1.5, 7.0))
+        painter.setFont(f)
+        painter.setPen(QColor("#8f8f8f"))
+        fm2 = painter.fontMetrics()
+        resumen = (index.data(Qt.UserRole + 1) or "").replace("Lleva: ", "")
+        painter.drawText(texto.left(), texto.bottom() - fm2.descent(),
+                         fm2.elidedText(resumen, Qt.ElideRight, texto.width()))
+        painter.restore()
+
 
 # (clave, etiqueta, min, max, escala) agrupados en secciones con divisor
 SLIDER_SECTIONS = [
@@ -633,7 +672,8 @@ class RenderJob(QRunnable):
         try:
             key = None
             if self.cache_tag:
-                key = "rend1-" + diskcache.result_key(self.base, self.cache_tag)
+                # rend2: contraste nuevo y curva base de camara (2026-09-22)
+                key = "rend2-" + diskcache.result_key(self.base, self.cache_tag)
                 hit = diskcache.load_result(self.path, key)
                 if hit is not None:
                     out = np.ascontiguousarray(hit[0])
@@ -651,7 +691,9 @@ class RenderJob(QRunnable):
             out = engine.apply_edits(base, self.edits, ai_masks=self.ai_masks,
                                      denoised=self.denoised, faced=self.faced,
                                      is_raw=loader.is_raw(self.path),
-                                     should_stop=self.stale)
+                                     should_stop=self.stale,
+                                     camera=loader.camera_tones(self.path),
+                                     wb_color=wb.camera_color(self.path))
             if key:
                 diskcache.save_result(self.path, key, out)
             self.signals.preview_ready.emit(self.path, self.gen, np_to_qimage(out), out)
@@ -691,7 +733,7 @@ class DetailJob(QRunnable):
             got = engine.render_detail(
                 geo, self.edits, self.box, is_raw=self.is_raw,
                 ai_masks=self.window.mask_ai_cache.get(self.path),
-                stats=stats,
+                stats=stats, wb_color=wb.camera_color(self.path),
                 should_stop=lambda: self.window.detail_gen != self.gen)
             if got is None:
                 return
@@ -2136,33 +2178,6 @@ class MainWindow(QMainWindow):
         self._add_slider_rows(param_grid, PARAM_SLIDERS, 0)
         cv_layout.addLayout(param_grid)
 
-        preset_box = QGroupBox("Preajustes")
-        pv = QVBoxLayout(preset_box)
-        self.preset_list = QListWidget()
-        self.preset_list.setWordWrap(True)   # que el resumen quepa entero,
-                                              # no cortado a lo ancho
-        self.preset_list.setMaximumHeight(340)
-        self.preset_list.itemDoubleClicked.connect(lambda _: self.apply_preset())
-        pv.addWidget(self.preset_list)
-        row1 = QHBoxLayout()
-        b_save = QPushButton("Guardar")
-        b_save.clicked.connect(self.save_preset)
-        b_update = QPushButton("Actualizar")
-        b_update.setToolTip(
-            "Vuelve a guardar el preajuste seleccionado con los ajustes de "
-            "ahora, con los mismos bloques que ya llevaba (para cambiar "
-            "cuales lleva, usa Guardar con el mismo nombre)")
-        b_update.clicked.connect(self.update_preset)
-        b_apply = QPushButton("Aplicar")
-        b_apply.clicked.connect(self.apply_preset)
-        b_del = QPushButton("Eliminar")
-        b_del.clicked.connect(self.delete_preset)
-        row1.addWidget(b_save)
-        row1.addWidget(b_update)
-        row1.addWidget(b_apply)
-        row1.addWidget(b_del)
-        pv.addLayout(row1)
-
         right_layout.addWidget(adjust_box)
         right_layout.addWidget(curve_box)
         right_layout.addWidget(color_box)
@@ -2170,8 +2185,10 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(face_box)
         right_layout.addWidget(effects_box)
         right_layout.addWidget(cal_box)
-        right_layout.addWidget(preset_box)
         right_layout.addStretch()
+        # los preajustes ya no van al fondo de este panel: tienen su propio
+        # panel plegable (ver _build_preset_drawer)
+        self.preset_drawer = self._build_preset_drawer()
 
         right_scroll = QScrollArea()
         right_scroll.setWidget(right)
@@ -2191,6 +2208,16 @@ class MainWindow(QMainWindow):
             tab_row.addWidget(btn)
             self.tab_buttons[key] = btn
         self.tab_buttons["revelar"].setChecked(True)
+        # no es una pestana mas: abre y cierra el panel de preajustes al lado,
+        # sin tapar el que estes usando
+        self.preset_toggle = QPushButton(icon("mdi6.palette-swatch-outline"),
+                                         "Preajustes")
+        self.preset_toggle.setCheckable(True)
+        self.preset_toggle.setToolTip("Abre o cierra el panel de preajustes (P)")
+        self.preset_toggle.toggled.connect(self._toggle_preset_drawer)
+        tab_row.addWidget(self.preset_toggle)
+        sc = QShortcut(QKeySequence("P"), self)
+        sc.activated.connect(self.preset_toggle.toggle)
 
         self.panel_stack = QStackedWidget()
         self.panel_stack.addWidget(right_scroll)
@@ -2236,11 +2263,14 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(film_container)
         splitter.addWidget(self.preview)
+        splitter.addWidget(self.preset_drawer)
         splitter.addWidget(side)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([200, 840, 380])
+        splitter.setStretchFactor(3, 0)
+        splitter.setSizes([200, 840, 260, 380])
+        self.preset_drawer.hide()
         self.setCentralWidget(splitter)
         self.statusBar().showMessage("Listo")
         # barra animada que indica trabajo de IA/corrector en curso
@@ -3020,6 +3050,7 @@ class MainWindow(QMainWindow):
             self._save_masks()
         path = item.data(Qt.UserRole)
         self.current_path = path
+        self._preview_edits = None   # la vista previa de un preajuste era de la otra
         self.ai_paused = False   # foto nueva, la pausa del Detener no aplica
         if self.a_original.isChecked():
             self.a_original.blockSignals(True)
@@ -3173,6 +3204,11 @@ class MainWindow(QMainWindow):
                                          stale=self._stale_check(self.gen)))
             return
         edits = dict(self.current_edits)
+        if self._preview_edits is not None:
+            # pasando el raton por un preajuste: se ensena como quedaria, sin
+            # guardarlo (la bandera evita que se cachee o sea la miniatura)
+            edits = dict(self._preview_edits)
+            edits["_preset_preview"] = True
         if self.show_mask:
             edits["_show_mask"] = True  # solo para esta pasada, no se guarda
         if self.crop_mode:
@@ -3309,7 +3345,8 @@ class MainWindow(QMainWindow):
             stats = engine.detail_stats(
                 cv2.resize(geo, None, fx=0.25, fy=0.25,
                            interpolation=cv2.INTER_AREA),
-                edits, is_raw)
+                edits, is_raw, camera=loader.camera_tones(path),
+                base=full[::4, ::4])
             self._detail_geo = (path, firma, geo, stats)
         return self._detail_geo[2], self._detail_geo[3]
 
@@ -3997,10 +4034,12 @@ class MainWindow(QMainWindow):
             self._touch_detail()
             if arr is not None:
                 self.histogram.set_image(arr)
+                self.curve_widget.set_histogram(self.histogram.lum_hist)
             if self.crop_mode:
                 self.preview.set_crop_rect(self.current_edits.get("crop") or None)
             elif not (self.show_mask or self.a_original.isChecked()
-                      or self.a_brush.isChecked()):
+                      or self.a_brush.isChecked()
+                      or self._preview_edits is not None):
                 # se guarda como miniatura del revelado; _update_film_icon
                 # decide si toca ensenarla o dejar la de la camara
                 self._update_film_icon(path, image, rendered=True)
@@ -4055,7 +4094,10 @@ class MainWindow(QMainWindow):
         probe_edits = {**self.current_edits, "exposure": 0.0,
                        "_draft_skip_detail": True}
         is_raw = loader.is_raw(self.current_path)
-        rendered = engine.apply_edits(base, probe_edits, is_raw=is_raw)
+        rendered = engine.apply_edits(
+            base, probe_edits, is_raw=is_raw,
+            camera=loader.camera_tones(self.current_path),
+            wb_color=wb.camera_color(self.current_path))
         ev = engine.auto_exposure(rendered.astype(np.float32) / 255.0)
         
         # Aplicar al slider de exposicion
@@ -4081,6 +4123,9 @@ class MainWindow(QMainWindow):
         if self.a_original.isChecked():
             self.a_original.setChecked(False)  # mover un ajuste vuelve a la edición
         self._last_edit_key = key
+        if key in ("temperature", "tint") and getattr(self, "_wb_color", None):
+            self._on_wb_slider(key, value)
+            return
         real = value / scale
         self.current_edits[key] = real
         val_label.setText(f"{real:.2f}".rstrip("0").rstrip(".") if scale != 1.0 else str(int(real)))
@@ -4089,6 +4134,8 @@ class MainWindow(QMainWindow):
             self._update_auto_btn_style(self._auto_exp_btn, False)
         if key == "sharp_masking":
             self.show_mask = bool(QApplication.keyboardModifiers() & Qt.AltModifier)
+        if key.startswith("p_"):
+            self._sync_parametric_view()
         if self.current_path:
             self.store.set(self.current_path, self.current_edits)
         self._throttle_render()
@@ -4098,9 +4145,98 @@ class MainWindow(QMainWindow):
             self.show_mask = False
             self.request_render()
 
+    # --- Balance de blancos en Kelvin (RAW) -----------------------------
+    # En un RAW los deslizadores de Temperatura y Matiz dejan de ser un tinte
+    # relativo (-100..100) y pasan a mostrar el balance REAL: arrancan en el
+    # que uso la camara al disparar (ver wb.py). Se guardan en wb_temp /
+    # wb_tint; wb_temp 0 = "como se disparo". En JPG siguen siendo relativos,
+    # igual que en Lightroom.
+    # Posicion del deslizador de temperatura: lineal en mireds (1e6/K), que
+    # es como el ojo nota los cambios — con Kelvin lineales, de 2000 a 6000 K
+    # (donde esta todo lo interesante) cabria en una decima parte del recorrido
+    @staticmethod
+    def _kelvin_to_pos(k):
+        return int(round((500.0 - 1e6 / k) / 0.48))
+
+    @staticmethod
+    def _pos_to_kelvin(p):
+        return int(round(1e6 / (500.0 - p * 0.48) / 10.0) * 10)
+
+    def _wb_now(self):
+        """(Kelvin, matiz) actuales de la foto: los elegidos o los de disparo."""
+        e = self.current_edits
+        if e.get("wb_temp"):
+            return int(e["wb_temp"]), int(round(e.get("wb_tint", 0.0)))
+        return self._wb_color.as_shot
+
+    def _on_wb_slider(self, key, value):
+        temp, tint = self._wb_now()
+        if key == "temperature":
+            temp = self._pos_to_kelvin(value)
+        else:
+            tint = int(value)
+        ts = self.sliders["temperature"]
+        if ts.value() == ts.default_value and tint == self._wb_color.as_shot[1]:
+            # de vuelta al punto de disparo (doble clic): "como se disparo"
+            # exacto, no el Kelvin redondeado de la posicion del deslizador
+            self.current_edits["wb_temp"] = self.current_edits["wb_tint"] = 0.0
+            temp, tint = self._wb_color.as_shot
+        else:
+            self.current_edits["wb_temp"] = float(temp)
+            self.current_edits["wb_tint"] = float(tint)
+        self._show_wb_labels(temp, tint)
+        if self.current_path:
+            self.store.set(self.current_path, self.current_edits)
+        self._throttle_render()
+
+    def _show_wb_labels(self, temp, tint):
+        self.value_labels["temperature"].setText(f"{temp}K")
+        self.value_labels["tint"].setText(f"{tint:+d}" if tint else "0")
+
+    def _sync_wb_mode(self):
+        """Pone los dos deslizadores en Kelvin (RAW con datos de color) o en
+        relativo (el resto). Va ANTES de dar valores: setValue recorta al
+        rango que tenga el deslizador en ese momento."""
+        path = self.current_path
+        c = wb.camera_color(path) if path and loader.is_raw(path) else None
+        self._wb_color = c
+        ts, ns = self.sliders["temperature"], self.sliders["tint"]
+        # "50000K" no cabe en los 42 px del resto; mas ancho saca una barra
+        # de desplazamiento horizontal en el panel
+        self.value_labels["temperature"].setFixedWidth(48 if c else 42)
+        if c is None:
+            ts.setRange(-100, 100); ns.setRange(-100, 100)
+            ts.default_value = ns.default_value = 0
+            ts.setToolTip(""); ns.setToolTip("")
+            return
+        e = self.current_edits
+        # ediciones de antes, con el tinte relativo: se pasan a Kelvin a ojo
+        # (+100 era como calentar un paso) para no perderlas
+        if not e.get("wb_temp") and (e.get("temperature") or e.get("tint")):
+            k0, t0 = c.as_shot
+            e["wb_temp"] = float(round(k0 * 2.0 ** (e.get("temperature", 0.0) / 100.0)))
+            e["wb_tint"] = float(round(t0 + e.get("tint", 0.0) * 0.6))
+            e["temperature"] = e["tint"] = 0.0
+            self.store.set(path, e)
+        ts.setRange(0, 1000); ns.setRange(-150, 150)
+        ts.default_value = self._kelvin_to_pos(c.as_shot[0])
+        ns.default_value = c.as_shot[1]
+        disparo = f"Al disparar: {c.as_shot[0]} K, matiz {c.as_shot[1]:+d}\n" \
+                  "Doble clic para volver a él."
+        ts.setToolTip(disparo); ns.setToolTip(disparo)
+        temp, tint = self._wb_now()
+        for s, v in ((ts, self._kelvin_to_pos(temp)), (ns, tint)):
+            s.blockSignals(True)
+            s.setValue(v)
+            s.blockSignals(False)
+        self._show_wb_labels(temp, tint)
+
     def _sync_sliders(self):
+        self._sync_wb_mode()
         for item in (SLIDERS + PARAM_SLIDERS + PC_SLIDERS + CROP_SLIDERS):
             key = item[0]
+            if self._wb_color and key in ("temperature", "tint"):
+                continue
             scale = item[4]
             slider = self.sliders[key]
             slider.blockSignals(True)
@@ -4129,6 +4265,15 @@ class MainWindow(QMainWindow):
     def _sync_curve_widget(self):
         key, _label, color = CURVE_CHANNELS[self.channel_combo.currentIndex()]
         self.curve_widget.set_curve(self.current_edits.get(key, engine.DEFAULT_CURVE), color)
+        self._sync_parametric_view()
+
+    def _sync_parametric_view(self):
+        """Dibuja en el grafico la curva de los deslizadores parametricos."""
+        e = self.current_edits
+        par = [e.get(k, 0.0) / 100.0
+               for k in ("p_shadows", "p_darks", "p_lights", "p_highlights")]
+        self.curve_widget.set_parametric(
+            engine._parametric_lut(*par, n=256) if any(par) else None)
 
     def on_channel_changed(self, _index):
         self._sync_curve_widget()
@@ -4872,13 +5017,7 @@ class MainWindow(QMainWindow):
             path = item.data(Qt.UserRole)
             # cada foto conserva sus propios trazos del corrector y borrados
             saved = self.store.get(path)
-            if groups is None:
-                merged = engine.full_edits(edits)
-            else:
-                merged = presets.apply_to(engine.full_edits(saved), edits,
-                                          groups)
-            merged["heal_strokes"] = saved.get("heal_strokes", [])
-            merged["erase_ops"] = saved.get("erase_ops", [])
+            merged = self._merge_preset(saved, edits, groups)
             self.store.set(path, merged)
             self._update_film_icon(path)  # insignia de edicion al dia
             if path == self.current_path:
@@ -4888,6 +5027,152 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{message} en {len(items)} foto(s)")
 
     # ---------- preajustes ----------
+    #
+    # Antes vivian al fondo del panel Revelar, en una lista de dos lineas de
+    # alto: con muchos preajustes no habia forma comoda de llegar ni de
+    # encontrarlos. Ahora tienen un panel propio junto a la foto que se abre
+    # y cierra con el boton "Preajustes" (o la tecla P), con buscador y vista
+    # previa al pasar el raton, como en Lightroom.
+
+    def _build_preset_drawer(self):
+        drawer = QFrame()
+        drawer.setObjectName("presetDrawer")
+        drawer.setStyleSheet(
+            "#presetDrawer { background: #202020; border-left: 1px solid #333;"
+            " border-right: 1px solid #333; }"
+            "")
+        drawer.setMinimumWidth(200)
+        drawer.setMaximumWidth(300)
+        v = QVBoxLayout(drawer)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
+
+        head = QHBoxLayout()
+        title = QLabel("Preajustes")
+        title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        head.addWidget(title)
+        head.addStretch()
+        close = QPushButton(icon("mdi6.close"), "")
+        close.setFlat(True)
+        close.setFixedSize(26, 26)
+        close.setToolTip("Cerrar (P)")
+        close.clicked.connect(lambda: self.preset_toggle.setChecked(False))
+        head.addWidget(close)
+        v.addLayout(head)
+
+        self.preset_search = QLineEdit()
+        self.preset_search.setPlaceholderText("Buscar…")
+        self.preset_search.setClearButtonEnabled(True)
+        self.preset_search.textChanged.connect(self._filter_presets)
+        v.addWidget(self.preset_search)
+
+        self.preset_list = QListWidget()
+        self.preset_list.setItemDelegate(PresetDelegate(self.preset_list))
+        self.preset_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.preset_list.setMouseTracking(True)
+        self.preset_list.itemDoubleClicked.connect(lambda _: self.apply_preset())
+        self.preset_list.itemEntered.connect(self._hover_preset)
+        self.preset_list.viewport().installEventFilter(self)
+        self.preset_list.setToolTip(
+            "Pasa el ratón por encima para ver cómo queda la foto.\n"
+            "Doble clic (o Aplicar) para ponerlo.")
+        v.addWidget(self.preset_list, 1)
+
+        self.preset_empty = QLabel(
+            "Aún no tienes preajustes.\nRevela una foto a tu gusto y pulsa "
+            "«Guardar» para usar esos ajustes en otras.")
+        self.preset_empty.setWordWrap(True)
+        self.preset_empty.setAlignment(Qt.AlignCenter)
+        self.preset_empty.setStyleSheet("color: #8a8a8a; padding: 12px;")
+        v.addWidget(self.preset_empty)
+
+        b_apply = QPushButton(icon("mdi6.check"), "Aplicar")
+        b_apply.setToolTip("Pone el preajuste en las fotos seleccionadas")
+        b_apply.clicked.connect(self.apply_preset)
+        v.addWidget(b_apply)
+        row = QHBoxLayout()
+        b_save = QPushButton(icon("mdi6.plus"), "Guardar")
+        b_save.setToolTip("Crea un preajuste con los ajustes de esta foto")
+        b_save.clicked.connect(self.save_preset)
+        b_update = QPushButton(icon("mdi6.refresh"), "Actualizar")
+        b_update.setToolTip(
+            "Vuelve a guardar el preajuste seleccionado con los ajustes de "
+            "ahora, con los mismos bloques que ya llevaba (para cambiar "
+            "cuales lleva, usa Guardar con el mismo nombre)")
+        b_update.clicked.connect(self.update_preset)
+        b_del = QPushButton(icon("mdi6.delete-outline"), "")
+        b_del.setToolTip("Eliminar el preajuste seleccionado")
+        b_del.setFixedWidth(34)
+        b_del.clicked.connect(self.delete_preset)
+        row.addWidget(b_save)
+        row.addWidget(b_update)
+        row.addWidget(b_del)
+        v.addLayout(row)
+
+        # la vista previa espera un instante: pasar el raton de largo por la
+        # lista no debe lanzar un revelado por cada preajuste que cruzas
+        self._preset_hover_timer = QTimer(self)
+        self._preset_hover_timer.setSingleShot(True)
+        self._preset_hover_timer.setInterval(120)
+        self._preset_hover_timer.timeout.connect(self._show_preset_preview)
+        self._preset_hover_name = None
+        self._preview_edits = None
+        return drawer
+
+    def _toggle_preset_drawer(self, on):
+        self.preset_drawer.setVisible(on)
+        if on:
+            self.preset_search.setFocus()
+        else:
+            self._end_preset_preview()
+
+    def _filter_presets(self, text):
+        t = text.strip().lower()
+        for i in range(self.preset_list.count()):
+            it = self.preset_list.item(i)
+            it.setHidden(bool(t) and t not in it.data(Qt.UserRole).lower())
+
+    def eventFilter(self, obj, event):
+        # el raton sale de la lista: vuelve la foto como esta de verdad
+        if (hasattr(self, "preset_list") and obj is self.preset_list.viewport()
+                and event.type() == event.Type.Leave):
+            self._end_preset_preview()
+        return super().eventFilter(obj, event)
+
+    def _hover_preset(self, item):
+        self._preset_hover_name = item.data(Qt.UserRole)
+        self._preset_hover_timer.start()
+
+    def _show_preset_preview(self):
+        name = self._preset_hover_name
+        if not name or not self.current_path:
+            return
+        edits = presets.load_preset(name)
+        if edits is None:
+            return
+        self._preview_edits = self._merge_preset(
+            self.current_edits, edits, presets.load_groups(name))
+        self.request_render()
+
+    def _end_preset_preview(self):
+        self._preset_hover_timer.stop()
+        self._preset_hover_name = None
+        if self._preview_edits is not None:
+            self._preview_edits = None
+            self.request_render(final=True)
+
+    @staticmethod
+    def _merge_preset(saved, edits, groups):
+        """Como quedan los ajustes de una foto al ponerle `edits`: con
+        `groups` (preajustes nuevos) solo esos bloques; sin el, el revelado
+        entero. Los trazos del corrector y los borrados son de cada foto."""
+        if groups is None:
+            merged = engine.full_edits(edits)
+        else:
+            merged = presets.apply_to(engine.full_edits(saved), edits, groups)
+        merged["heal_strokes"] = saved.get("heal_strokes", [])
+        merged["erase_ops"] = saved.get("erase_ops", [])
+        return merged
 
     def refresh_presets(self):
         self.preset_list.clear()
@@ -4895,10 +5180,16 @@ class MainWindow(QMainWindow):
             # el resumen de "que lleva" (incluidas las mascaras, si se
             # guardaron) va en el propio texto, no solo en el tooltip: de un
             # vistazo, sin pasar el raton por cada uno
-            it = QListWidgetItem(f"{name}\n{presets.summary(name)}")
+            resumen = presets.summary(name)
+            it = QListWidgetItem(name)
             it.setData(Qt.UserRole, name)
-            it.setToolTip(presets.summary(name))
+            it.setData(Qt.UserRole + 1, resumen)
+            it.setToolTip(f"<b>{name}</b><br>{resumen}")
             self.preset_list.addItem(it)
+        vacia = self.preset_list.count() == 0
+        self.preset_list.setVisible(not vacia)
+        self.preset_empty.setVisible(vacia)
+        self._filter_presets(self.preset_search.text())
 
     def save_preset(self):
         from photoraw.ui.preset_dialog import PresetSaveDialog
@@ -4945,6 +5236,8 @@ class MainWindow(QMainWindow):
             return
         name = item.data(Qt.UserRole)
         edits = presets.load_preset(name)
+        self._preset_hover_timer.stop()
+        self._preview_edits = None   # ya no es una prueba: pasa a ser de verdad
         self._apply_to_selection(edits, f"Preajuste «{name}» aplicado",
                                  groups=presets.load_groups(name))
 
@@ -5296,7 +5589,9 @@ class MainWindow(QMainWindow):
                         base = np.clip(base + (faced - original) * f_amount, 0.0, 1.0)
                 out = engine.apply_edits(base, edits, ai_masks=ai_masks,
                                          denoised=denoised, faced=faced,
-                                         is_raw=loader.is_raw(path))
+                                         is_raw=loader.is_raw(path),
+                                         camera=loader.camera_tones(path),
+                                         wb_color=wb.camera_color(path))
                 if sr_scale > 1:
                     progress.setLabelText(
                         f"Superresolución {sr_scale}× en {path.name}…")

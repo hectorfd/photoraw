@@ -98,7 +98,51 @@ def smart_exposure(img, ev):
     return np.clip(img * (1.0 + (sf - 1.0) * factor)[..., None], 0.0, 1.0)
 
 
-def auto_tone_weight(img, target=0.42):
+AUTO_TARGET = 0.42
+
+# Cuantiles con que se compara el RAW con la vista previa de la camara
+CAMERA_QS = np.linspace(0.005, 0.995, 41)
+# Pendiente maxima de la curva de camara: mas que esto, en las sombras mas
+# hondas, solo sacaria ruido a la luz
+CAMERA_MAX_SLOPE = 8.0
+
+
+def camera_base_lut(base, camera):
+    """Curva base para que el RAW abra con el reparto de tonos con que lo
+    revelo la camara (`camera` = `loader.camera_tones`).
+
+    Se empareja cuantil a cuantil el brillo del RAW con el de la vista previa
+    incrustada: el tono que en el RAW deja por debajo al 30 % de la foto va
+    al tono que deja por debajo al 30 % en la vista previa. Eso reproduce el
+    brillo y el contraste de la camara foto a foto (la noche sigue siendo
+    noche, la toma quemada sale quemada), cosa que ninguna curva fija
+    conseguia: el iPhone aclara cada foto distinto. Se mide sobre la foto
+    ENTERA y sin recortar, para que recortar no cambie los tonos."""
+    small = np.ascontiguousarray(base[::8, ::8])
+    lum = _luminance(small)
+    a = np.quantile(lum, CAMERA_QS).astype(np.float64)
+    b = np.asarray(camera, np.float64)
+    # puntos de control estrictamente crecientes, anclados en 0 y 1
+    xs, ys = [0.0], [0.0]
+    for x, y in zip(a, b):
+        if x > xs[-1] + 0.004:
+            xs.append(x)
+            ys.append(max(y, ys[-1]))
+    if xs[-1] < 0.999:
+        xs.append(1.0)
+        ys.append(max(1.0, ys[-1]))
+    xs, ys = np.array(xs), np.array(ys)
+    # sin escalones: se limita la pendiente de cada tramo
+    for i in range(1, len(xs)):
+        ys[i] = min(ys[i], ys[i - 1] + (xs[i] - xs[i - 1]) * CAMERA_MAX_SLOPE)
+    ys = np.minimum(ys, 1.0)
+    # se aclara un poco la nube de puntos (cuantiles vecinos meten dientes)
+    keep = np.unique(np.round(np.linspace(0, len(xs) - 1, 12)).astype(int))
+    return pchip_lut(np.stack([xs[keep], ys[keep]], 1).tolist(),
+                     LUT_N).astype(np.float32)
+
+
+def auto_tone_weight(img, target=AUTO_TARGET):
     """Cuanto hay que levantar esta foto, de 0 (nada) a 1 (todo).
 
     Va aparte de `auto_tone` porque la medida tiene que salir de la foto
@@ -121,7 +165,7 @@ def auto_tone_weight(img, target=0.42):
     return weight if weight >= 0.01 else 0.0
 
 
-def auto_tone(img, target=0.42, weight=None, log_avg=None):
+def auto_tone(img, target=AUTO_TARGET, weight=None, log_avg=None):
     """Correccion automatica de exposicion al abrir un RAW (como hacen
     Lightroom / Windows Fotos): solo entra cuando la foto esta realmente
     oscura (contraluces, interiores), y no toca las que ya estan bien
@@ -236,7 +280,11 @@ DEFAULT_EDITS = {
     "shadows": 0.0,      # -100 .. 100
     "whites": 0.0,       # -100 .. 100
     "blacks": 0.0,       # -100 .. 100
-    "temperature": 0.0,  # -100 (frio) .. 100 (calido)
+    "temperature": 0.0,  # -100 (frio) .. 100 (calido)  (JPG y mascaras)
+    # Balance de blancos real de los RAW (ver wb.py): Kelvin y matiz como en
+    # Lightroom. wb_temp 0 = "como se disparo" (los dos a la vez)
+    "wb_temp": 0.0,      # 2000 .. 50000 K
+    "wb_tint": 0.0,      # -150 (verde) .. 150 (magenta)
     # Mapeo tonal adaptativo (Reinhard modificado)
     "tone_map": 0.0,     # 0..100 (0 = desactivado, 100 = maximo efecto)
     # Contraste adaptativo local (CLAHE)
@@ -444,16 +492,34 @@ def pchip_lut(points, n=256):
 
 
 def _parametric_lut(shadows, darks, lights, highlights, n=256):
-    """Curva parametrica: cuatro regiones con transicion suave."""
+    """Curva parametrica: cuatro regiones con transicion suave, como la de
+    Lightroom.
+
+    Antes se sumaban cuatro campanas sin mas, y medido: Sombras +100 subia
+    el negro puro a 34/255 y Iluminaciones -100 bajaba el blanco a 221 (foto
+    lavada); Iluminaciones +100 quemaba de golpe el 14 % de los tonos, y
+    Claros +100 con Iluminaciones -100 hacia que un 11 % de la curva BAJARA
+    (tonos invertidos: manchas en cielos y pieles). Ahora el negro y el blanco
+    quedan clavados, cada campana se apaga al llegar a su extremo y la curva
+    nunca baja ni se aplana del todo."""
     x = np.linspace(0.0, 1.0, n)
 
-    def bump(center, width=0.38):
+    def bump(center, width=0.25):
         t = np.clip((x - center) / width, -1.0, 1.0)
         return (np.cos(t * np.pi) + 1.0) / 2.0
 
-    y = x + 0.15 * (shadows * bump(0.08) + darks * bump(0.35)
-                    + lights * bump(0.65) + highlights * bump(0.92))
-    return np.clip(y, 0.0, 1.0)
+    # se apaga en los extremos: el negro y el blanco no se mueven. La rampa
+    # mide lo mismo que la amplitud (0,16): asi una campana sola nunca se pasa
+    # del blanco ni baja del negro, y el re-escalado de abajo casi no actua
+    # (con una rampa mas corta Iluminaciones +100 oscurecia los medios tonos)
+    ancla = np.clip(np.minimum(x, 1.0 - x) / 0.16, 0.0, 1.0)
+    y = x + 0.16 * ancla * (shadows * bump(0.14) + darks * bump(0.37)
+                            + lights * bump(0.63) + highlights * bump(0.86))
+    # nunca baja ni se queda plana: pendiente minima y se re-escala para
+    # que vuelva a acabar en 1
+    paso = np.maximum(np.diff(y), 0.12 / (n - 1))
+    y = np.concatenate([[0.0], np.cumsum(paso)])
+    return y / y[-1]
 
 
 def _compose(base, lut):
@@ -465,6 +531,11 @@ def _compose(base, lut):
 # Resolucion de las tablas de curvas: 4096 niveles evita el bandeado y
 # permite aplicarlas por indexado directo (mucho mas rapido que interpolar)
 LUT_N = 4096
+
+# La exposicion multiplica valores que ya llevan gamma (~2,2): para que +1 en
+# el deslizador sea un paso de luz de verdad (el doble de luz) se multiplica
+# por 2^(1/2,2). Con el /3 de antes +1 daba 0,8 pasos (medido en IMG_4188).
+EXPOSURE_GAMMA = 2.2
 
 
 def _tone_curve_lut(exposure, contrast, shadows, highlights, whites, blacks,
@@ -494,14 +565,14 @@ def _tone_curve_lut(exposure, contrast, shadows, highlights, whites, blacks,
     #    Whites: estira/comprime el extremo blanco
     #    Blacks: estira/comprime el extremo negro
     #    Funcion: soft clip en los extremos
+    #    Antes se reescalaba la foto entera entre dos puntos nuevos: Negros
+    #    -100 oscurecia tambien las luces y Blancos +100 quemaba el 5 % de un
+    #    golpe (medido en IMG_4188). Ahora cada uno empuja su extremo y se
+    #    apaga hacia el otro: el blanco mueve sobre todo el cuarto de arriba,
+    #    el negro el de abajo, y los medios tonos casi no se enteran.
     if whites or blacks:
-        # Punto blanco efectivo (1.0 = sin cambio)
-        white_point = 1.0 - whites * 0.15   # whites +1 → 0.85
-        # Punto negro efectivo (0.0 = sin cambio)
-        black_point = -blacks * 0.15         # blacks +1 → -0.15 (aclara, mate)
-        # Remapear de [black_point, white_point] a [0, 1]
-        span = max(white_point - black_point, 0.01)
-        x = np.clip((x - black_point) / span, 0.0, 1.0)
+        x = x + whites * 0.22 * x ** 3 + blacks * 0.22 * (1.0 - x) ** 3
+        x = np.clip(x, 0.0, 1.0)
 
     # 2. Sombras y luces: se ESTIRA la zona, no se le suma luz.
     #
@@ -547,20 +618,90 @@ def _tone_curve_lut(exposure, contrast, shadows, highlights, whites, blacks,
     #    contraste (acerca todo al gris medio, como bajar el contraste real)
     if contrast:
         if contrast > 0:
-            # k crece con la intensidad: 1 (casi lineal) .. 10 (S marcada)
-            k = 1.0 + contrast * 9.0
+            # S normalizada cuya pendiente crece de forma pareja con el
+            # deslizador: +100 = los medios tonos con ~1,9 veces su
+            # contraste. Antes se mezclaba ADEMAS una S que se endurecia (k
+            # hasta 10): los dos efectos se multiplicaban, de 0 a +50 casi no
+            # pasaba nada y de +50 a +100 las sombras se iban a negro
+            k = contrast * 7.0
             sigmoid = 1.0 / (1.0 + np.exp(-k * (x - 0.5)))
             # normalizar para que siga tocando 0 y 1 en los extremos
             s0 = 1.0 / (1.0 + np.exp(k * 0.5))
             s1 = 1.0 / (1.0 + np.exp(-k * 0.5))
-            sigmoid = (sigmoid - s0) / max(s1 - s0, 1e-6)
-            x = x * (1.0 - contrast) + sigmoid * contrast
+            x = (sigmoid - s0) / max(s1 - s0, 1e-6)
         else:
-            # reduce el rango tonal en torno al gris medio (mas plano)
-            x = 0.5 + (x - 0.5) * (1.0 + contrast)
+            # S invertida: aplana los medios tonos pero deja el negro en 0 y
+            # el blanco en 1. Antes se apretaba todo hacia 0,5 en linea recta
+            # y a -100 la foto entera quedaba de un solo gris.
+            c = -contrast
+            k = 1.0 + c * 6.0
+            s0 = 1.0 / (1.0 + np.exp(k * 0.5))
+            s1 = 1.0 / (1.0 + np.exp(-k * 0.5))
+            s = np.clip(x * (s1 - s0) + s0, 1e-6, 1.0 - 1e-6)
+            inversa = 0.5 + np.log(s / (1.0 - s)) / k
+            x = x * (1.0 - c) + inversa * c
         x = np.clip(x, 0.0, 1.0)
 
     return np.clip(x, 0.0, 1.0).astype(np.float32)
+
+
+def _guided_self(lum, r, eps):
+    """Filtro guiado de la luminancia sobre si misma: la suaviza como un
+    desenfoque de radio `r` pero respeta los bordes que contrastan mas que
+    ~sqrt(eps). Se calcula a resolucion reducida y se amplia (la version
+    "rapida" del filtro): el resultado es suave de por si."""
+    h, w = lum.shape
+    s = max(1, int(r // 4))
+    small = lum if s == 1 else cv2.resize(
+        lum, (max(w // s, 1), max(h // s, 1)), interpolation=cv2.INTER_AREA)
+    k = 2 * max(1, int(round(r / s))) + 1
+    box = lambda m: cv2.boxFilter(m, -1, (k, k), borderType=cv2.BORDER_REFLECT)
+    media = box(small)
+    var = box(small * small) - media * media
+    a = var / (var + eps)
+    b = media - a * media
+    a, b = box(a), box(b)
+    if s > 1:
+        a = cv2.resize(a, (w, h), interpolation=cv2.INTER_LINEAR)
+        b = cv2.resize(b, (w, h), interpolation=cv2.INTER_LINEAR)
+    return a * lum + b
+
+
+def _local_tones(img, shadows, highlights, region=None):
+    """Luces y Sombras por zonas, como Lightroom.
+
+    Antes eran parte de la curva unica: una curva que sube las sombras tiene
+    que apretar lo que hay encima, y ademas trata igual un pixel oscuro de la
+    textura de un jersey claro que una sombra de verdad. Medido en IMG_4188:
+    Sombras +100 dejaba el 73 % del detalle de las sombras y Luces -100 el
+    70 % del de las luces — el "gris lavado".
+
+    Ahora se separa la foto en ZONAS (la luminancia suavizada respetando
+    bordes, `_guided_self`) y DETALLE (lo que queda). La curva de luces y
+    sombras mueve solo las zonas; el detalle se vuelve a poner encima intacto
+    (y en sombras levantadas, crecido en la misma proporcion que la zona,
+    para que no se aplane). Asi bajar Luces recupera las nubes en vez de
+    volverlas gris, y subir Sombras abre la sombra sin lavarla.
+    Trabaja con proporciones entre canales, asi que el color no se pierde."""
+    lum = np.maximum(_luminance(img), 0.0).astype(np.float32)
+    lado = max(region[0], region[1]) if region else max(img.shape[:2])
+    # radio relativo al tamano de la foto ENTERA: la vista de detalle y la
+    # exportacion ven las mismas zonas que la vista previa (y 2r cabe en el
+    # margen de DETAIL_MARGIN a resolucion completa)
+    zonas = _guided_self(lum, max(2.0, 0.007 * lado), 0.01)
+    np.clip(zonas, 0.0, 1.0, out=zonas)
+    curva = _tone_curve_lut(0.0, 0.0, shadows, highlights, 0.0, 0.0)
+    nuevas = curva[_lut_index(zonas)]
+    crece = np.clip(nuevas / np.maximum(zonas, 1e-3), 1.0, 3.0)
+    if highlights < 0:
+        # en textura muy marcada el filtro se lleva parte del detalle a la
+        # zona y al bajarla se aplanaba algo (medido: 86-92 %). Bajar Luces
+        # es para RECUPERAR, asi que en las luces el detalle se refuerza
+        crece += (-highlights * 0.35) * np.clip((zonas - 0.4) / 0.6, 0.0, 1.0)
+    lum_nueva = nuevas + (lum - zonas) * crece
+    ganancia = np.maximum(lum_nueva, 0.0) / np.maximum(lum, 1e-4)
+    img *= ganancia[..., None]
+    return img
 
 
 def _build_channel_luts(e):
@@ -967,7 +1108,7 @@ def _mask_recipe(sub, wmap, a):
     tone = {k: a.get(k, 0.0) for k in ("exposure", "contrast", "highlights",
                                        "shadows", "whites", "blacks")}
     if any(tone.values()):
-        lut = _tone_curve_lut(exposure=tone["exposure"] / 3.0,
+        lut = _tone_curve_lut(exposure=tone["exposure"] / EXPOSURE_GAMMA,
                               contrast=tone["contrast"] / 100.0,
                               shadows=tone["shadows"] / 100.0,
                               highlights=tone["highlights"] / 100.0,
@@ -1089,10 +1230,12 @@ def _apply_masks(img, e, ai_masks=None, region=None):
     return img
 
 
-def _apply_profile(img, name):
+def _apply_profile(img, name, base_lut=None):
     """Interpretacion base del RAW. Todos los perfiles parten de la misma
     curva base (la del Estandar) y le suman su caracter encima, para que
-    cambiar de perfil sea una variacion y no un salto de brillo."""
+    cambiar de perfil sea una variacion y no un salto de brillo.
+    `base_lut`: curva base propia de esta foto (`camera_base_lut`); sin
+    ella se usa la fija `PROFILE_BASE_CURVE`."""
     if name == "":
         return img
     recipe = PROFILE_RECIPES.get(name)
@@ -1101,7 +1244,10 @@ def _apply_profile(img, name):
     style, sat = recipe
 
     # base y estilo se componen en una sola tabla: estilo(base(x))
-    lut = pchip_lut(PROFILE_BASE_CURVE, LUT_N).astype(np.float32)
+    if base_lut is not None:
+        lut = base_lut
+    else:
+        lut = pchip_lut(PROFILE_BASE_CURVE, LUT_N).astype(np.float32)
     if style is not None:
         slut = pchip_lut(style, LUT_N).astype(np.float32)
         lut = slut[(lut * (LUT_N - 1) + 0.5).astype(np.uint16)]
@@ -1220,7 +1366,7 @@ def detail_geometry(full, edits):
     return _apply_geometry(full, {**DEFAULT_EDITS, **edits})
 
 
-def detail_stats(geo, edits, is_raw=False):
+def detail_stats(geo, edits, is_raw=False, camera=None, base=None):
     """Medidas que solo tienen sentido mirando la foto ENTERA.
 
     Dos pasos del revelado no son locales: el arreglo automatico de
@@ -1228,18 +1374,24 @@ def detail_stats(geo, edits, is_raw=False):
     decidir cuanto levantarla. Si cada trozo se midiera a si mismo, no
     pegarian entre ellos. Se calcula una vez, sobre la foto reducida (son
     promedios: no hace falta la resolucion completa), y se le pasa a cada
-    trozo. Devuelve un diccionario para `apply_edits(stats=...)`."""
+    trozo. Devuelve un diccionario para `apply_edits(stats=...)`.
+    `camera` / `base`: tonos de la camara y la foto sin recortar, para la
+    curva base de camara (ver `camera_base_lut`)."""
     e = {**DEFAULT_EDITS, **edits}
     img = geo
     out = {}
     profile = PROFILE_ALIASES.get(e.get("profile", "standard"),
                                   e.get("profile", "standard"))
     if is_raw and profile != RAW_PROFILE:
-        out["auto_w"] = auto_tone_weight(img)
-        out["auto_log"] = log_avg_luminance(img)
-        img = auto_tone(img.copy(), weight=out["auto_w"],
-                        log_avg=out["auto_log"])
-        img = _apply_profile(img, profile)
+        if camera is not None:
+            out["cam_lut"] = camera_base_lut(geo if base is None else base,
+                                             camera)
+        else:
+            out["auto_w"] = auto_tone_weight(img)
+            out["auto_log"] = log_avg_luminance(img)
+            img = auto_tone(img.copy(), weight=out["auto_w"],
+                            log_avg=out["auto_log"])
+        img = _apply_profile(img, profile, out.get("cam_lut"))
     if e.get("tone_map", 0.0) > 0:
         out["tm_log"] = log_avg_luminance(_apply_calibration(img, e))
     return out
@@ -1252,7 +1404,8 @@ DETAIL_MARGIN = 64
 
 
 def render_detail(geo, edits, box, is_raw=False, ai_masks=None,
-                  stats=None, should_stop=None, margin=DETAIL_MARGIN):
+                  stats=None, should_stop=None, margin=DETAIL_MARGIN,
+                  wb_color=None):
     """Revela a resolucion completa SOLO el trozo que se esta mirando.
 
     `geo` es la foto completa ya pasada por `detail_geometry`, y `box` es el
@@ -1275,7 +1428,7 @@ def render_detail(geo, edits, box, is_raw=False, ai_masks=None,
 
     out = apply_edits(sub, edits, ai_masks=ai_masks, is_raw=is_raw,
                       should_stop=should_stop, region=(gh, gw, my0, mx0),
-                      stats=stats)
+                      stats=stats, wb_color=wb_color)
     # fuera el margen: se revelo solo para que los filtros vieran el entorno
     out = out[y0 - my0:y0 - my0 + (y1 - y0), x0 - mx0:x0 - mx0 + (x1 - x0)]
     return np.ascontiguousarray(out), (x0, y0, x1, y1)
@@ -1299,8 +1452,12 @@ def _check(stop):
 
 
 def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None,
-                is_raw=False, should_stop=None, region=None, stats=None):
+                is_raw=False, should_stop=None, region=None, stats=None,
+                camera=None, wb_color=None):
     """base: float32 RGB en rango 0..1. Devuelve uint8 RGB listo para mostrar.
+    `wb_color`: `wb.CameraColor` del RAW, para el balance en Kelvin.
+    `camera`: como revelo la camara este RAW (`loader.camera_tones`); si se
+    da, la curva base reproduce ese revelado en vez del aclarado automatico.
     `ai_masks`: mapas de segmentacion IA pre-geometria, p. ej. {"subject": m}.
     `denoised` / `faced`: resultados IA pre-geometria (misma forma que base),
     para las mascaras con ruido IA / rostros IA locales.
@@ -1332,10 +1489,30 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None,
     # con el perfil "RAW" tampoco: ese pide el archivo sin interpretar
     profile = e.get("profile", "standard")
     profile = PROFILE_ALIASES.get(profile, profile)
+    tone_exposure = e["exposure"]
+    # Balance de blancos en Kelvin: lo primero, sobre la luz del RAW recien
+    # revelado, igual que si la camara hubiera disparado con ese balance
+    if is_raw and wb_color is not None and e.get("wb_temp"):
+        from photoraw import wb
+        img = wb.apply(img, wb_color.correction(e["wb_temp"],
+                                                e.get("wb_tint", 0.0)))
     if is_raw and profile != RAW_PROFILE:
-        img = auto_tone(img, weight=st.get("auto_w"),
-                        log_avg=st.get("auto_log"))
-        img = _apply_profile(img, profile)
+        cam_lut = st.get("cam_lut")
+        if cam_lut is None and camera is not None and region is None:
+            cam_lut = camera_base_lut(base, camera)
+        if cam_lut is None:
+            img = auto_tone(img, weight=st.get("auto_w"),
+                            log_avg=st.get("auto_log"))
+        elif e["exposure"]:
+            # Con la curva de camara la exposicion va ANTES de ella, como en
+            # Lightroom: en una toma quemada la curva ya aplasta las luces, y
+            # bajar la exposicion despues solo las volvia un gris liso
+            # (medido en IMG_4187). Antes de la curva vuelve el detalle que
+            # el RAW si tiene. Misma cantidad por paso que el deslizador.
+            img = img * np.float32(2.0 ** (e["exposure"] / EXPOSURE_GAMMA))
+            np.clip(img, 0.0, 1.0, out=img)
+            tone_exposure = 0.0
+        img = _apply_profile(img, profile, cam_lut)
     img = _apply_calibration(img, e)
     _check(should_stop)
 
@@ -1357,38 +1534,20 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None,
     # Los 6 sliders (exposure, contrast, shadows, highlights, whites, blacks)
     # generan UNA sola curva que se aplica como LUT.
     tone_lut = _tone_curve_lut(
-        exposure=e["exposure"] / 3.0,      # normalizar a -1..1
+        exposure=tone_exposure / EXPOSURE_GAMMA,
         contrast=e["contrast"] / 100.0,    # -1..1
-        shadows=e["shadows"] / 100.0,      # -1..1
-        highlights=e["highlights"] / 100.0, # -1..1
+        # Luces y Sombras van aparte, por zonas (ver `_local_tones`)
+        shadows=0.0,
+        highlights=0.0,
         whites=e["whites"] / 100.0,        # -1..1
         blacks=e["blacks"] / 100.0,        # -1..1
     )
     # la misma curva para los tres canales: se lee la tabla de una pasada en
     # vez de canal a canal (leer `idx[..., c]` va salteado por la memoria)
-    if e["shadows"] > 0 or e["highlights"] < 0:
-        # Recuperar sombras (o luces) por canal DESTINE el color. Un rojo
-        # oscuro (0,10 / 0,02 / 0,02) tiene sus canales en proporcion 5:1;
-        # al pasarlos por la misma curva se acercan entre si y la proporcion
-        # cae a 2,5:1 — el rojo se vuelve gris claro. Medido en una foto real:
-        # levantar sombras a tope se comia el 30 % del color de esas zonas, y
-        # eso es la mitad de la sensacion de "sombra pintada de gris".
-        #
-        # La cura: junto a la version por canal se calcula otra que sube el
-        # brillo conservando la proporcion exacta entre canales, y se mezclan.
-        # Solo por canal desaturaria; solo por proporcion satura de mas y se
-        # sale de gama en las zonas muy levantadas. A medias queda natural.
-        lum_antes = _luminance(img)
-        curvada = tone_lut[_lut_index(img)]
-        lum_despues = _luminance(curvada)
-        ganancia = lum_despues / np.maximum(lum_antes, 1e-4)
-        # la correccion solo actua donde de verdad se ha levantado el tono
-        peso = np.clip(ganancia - 1.0, 0.0, 1.0) * 0.5
-        proporcional = np.clip(img * ganancia[..., None], 0.0, 1.0)
-        img = curvada + (proporcional - curvada) * peso[..., None]
-        np.clip(img, 0.0, 1.0, out=img)
-    else:
-        img = tone_lut[_lut_index(img)]
+    img = tone_lut[_lut_index(img)]
+    if e["shadows"] or e["highlights"]:
+        img = _local_tones(img, e["shadows"] / 100.0, e["highlights"] / 100.0,
+                           region)
         np.clip(img, 0.0, 1.0, out=img)
 
     _check(should_stop)

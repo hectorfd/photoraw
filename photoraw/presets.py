@@ -31,7 +31,8 @@ def _keys(*names_or_prefixes):
 # sobre una foto concreta y casi nunca sirven igual en otra.
 GROUPS = [
     ("profile",  "Perfil de color",        _keys("profile"), True),
-    ("wb",       "Balance de blancos",     _keys("temperature", "tint"), True),
+    ("wb",       "Balance de blancos",     _keys("temperature", "tint",
+                                                   "wb_temp", "wb_tint"), True),
     ("tone",     "Luz y tono",
      _keys("exposure", "contrast", "highlights", "shadows", "whites",
            "blacks", "tone_map", "adaptive_contrast"), True),

@@ -1,4 +1,5 @@
 """Carga de archivos RAW e imagenes normales."""
+import functools
 import io
 from pathlib import Path
 import numpy as np
@@ -69,6 +70,21 @@ def _load_tiff16(path):
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
+DEFAULT_BASELINE_EV = 1.0
+
+
+def _baseline_exposure(path):
+    """Etiqueta DNG BaselineExposure (50730) en EV, o None si no la trae."""
+    if Path(path).suffix.lower() != ".dng":
+        return None
+    try:
+        with Image.open(path) as im:
+            ev = im.tag_v2.get(50730)
+        return float(ev) if ev is not None else None
+    except Exception:
+        return None
+
+
 def _load_rgb(path, half_size):
     """Devuelve uint8 RGB (o uint16 en RAW y TIFF de 16 bits), ya con la
     correccion de lente (distorsion, aberracion cromatica, vineteado)
@@ -83,10 +99,23 @@ def _load_rgb(path, half_size):
         # aclara casi un paso entero (medido en IMG_3621-23: de 93 a 120 de
         # media), o sea que la foto no se abre como se guardo.
         propio = dng.es_nuestro(path)
+        # El auto-brillo de LibRaw estira hasta quemar el 1 % de la foto. De
+        # noche las farolas son menos de ese 1 %, asi que lo sube TODO (medido
+        # en IMG_4171: mediana de 6 a 40, la noche parecia de dia) y ademas
+        # iguala las tomas de un horquillado (IMG_4185-88: la de +2 EV y la
+        # de -2 EV abrian casi igual). Se abre con la luz que capto el sensor
+        # mas la exposicion base del DNG (como Lightroom); si no la trae, 1 EV,
+        # que es lo que ponen los iPhone. Si aun asi queda oscura, ya la
+        # levanta `engine.auto_tone` hasta donde la dejo la camara.
+        opts = dict(use_camera_wb=True, half_size=half_size, output_bps=16,
+                    no_auto_bright=True,
+                    highlight_mode=rawpy.HighlightMode.Blend)
+        if not propio:
+            base_ev = _baseline_exposure(path)
+            opts["bright"] = 2.0 ** (DEFAULT_BASELINE_EV if base_ev is None
+                                     else base_ev)
         with rawpy.imread(str(path)) as raw:
-            rgb = raw.postprocess(use_camera_wb=True, half_size=half_size,
-                                  output_bps=16, no_auto_bright=propio,
-                                  highlight_mode=rawpy.HighlightMode.Blend)
+            rgb = raw.postprocess(**opts)
         return lens.correct(rgb, path)
     tiff16 = _load_tiff16(path)
     if tiff16 is not None:
@@ -143,6 +172,32 @@ def load_thumb_bytes(path):
     except Exception:
         pass
     return None, 0
+
+
+@functools.lru_cache(maxsize=64)
+def _camera_tones_cached(path, mtime):
+    data, _ = load_thumb_bytes(path)
+    if not data:
+        return None
+    gris = cv2.imdecode(np.frombuffer(data, np.uint8),
+                        cv2.IMREAD_REDUCED_GRAYSCALE_4)
+    if gris is None or min(gris.shape) < 64:
+        return None
+    from photoraw import engine
+    return np.quantile(gris, engine.CAMERA_QS).astype(np.float32) / 255.0
+
+
+def camera_tones(path):
+    """Como revelo la CAMARA este RAW: los cuantiles de brillo de su vista
+    previa incrustada (ver `engine.CAMERA_QS`), o None si no trae. El motor
+    ajusta su curva base para que el RAW abra con ese mismo reparto de
+    tonos: la noche oscura, la toma quemada de un horquillado quemada."""
+    if not is_raw(path):
+        return None
+    try:
+        return _camera_tones_cached(str(path), Path(path).stat().st_mtime)
+    except Exception:
+        return None
 
 
 def decode_thumb(data, flip):
