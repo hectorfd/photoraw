@@ -302,7 +302,9 @@ DEFAULT_EDITS = {
     "sharp_masking": 0.0,  # 0 .. 100
     # Reduccion de ruido manual
     "nr_luminance": 0.0,   # 0 .. 100
-    "nr_color": 0.0,       # 0 .. 100
+    # 1 de fabrica: se probo 25 (como Lightroom) y a Hector le quitaba
+    # demasiada calidad; lo sube a mano cuando la foto lo pide
+    "nr_color": 1.0,       # 0 .. 100
     # Reduccion de ruido IA (intensidad de mezcla; se aplica fuera del motor)
     "ai_denoise": 0.0,     # 0 .. 100
     # Retoque de rostros IA (intensidad de mezcla; se aplica fuera del motor)
@@ -373,8 +375,16 @@ DEFAULT_EDITS.update({"profile": "standard"})
 
 # Curva base comun a TODOS los perfiles: es la interpretacion "Estandar",
 # la que saca el RAW de su linealidad y lo deja con brillo correcto.
-PROFILE_BASE_CURVE = [[0.0, 0.0], [0.10, 0.16], [0.25, 0.34], [0.45, 0.53],
-                      [0.65, 0.73], [0.85, 0.89], [1.0, 1.0]]
+# MEDIDA en Camera Raw 18 (perfil Adobe Color, todo a cero) con IMG_4210:
+# cuantil a cuantil, lo que PhotoRAW abre con el perfil RAW (exposicion base
+# del DNG incluida) frente a lo que ensena Photoshop. Es fija, como la de
+# Adobe: la noche sigue oscura y cada foto conserva su exposicion
+PROFILE_BASE_CURVE = [
+    [0.0, 0.0], [0.0039, 0.02], [0.0078, 0.027], [0.0157, 0.055],
+    [0.0235, 0.133], [0.0314, 0.196], [0.0471, 0.29], [0.0627, 0.341],
+    [0.0941, 0.455], [0.1255, 0.529], [0.1882, 0.675], [0.251, 0.78],
+    [0.3137, 0.875], [0.3765, 0.951], [0.502, 0.983], [0.6902, 0.999],
+    [1.0, 1.0]]
 
 # Caracter de cada perfil: curva de estilo que se aplica ENCIMA de la base
 # (no la reemplaza) y saturacion tipo vitalidad. Asi todos los perfiles son
@@ -515,10 +525,21 @@ def _parametric_lut(shadows, darks, lights, highlights, n=256):
     ancla = np.clip(np.minimum(x, 1.0 - x) / 0.16, 0.0, 1.0)
     y = x + 0.16 * ancla * (shadows * bump(0.14) + darks * bump(0.37)
                             + lights * bump(0.63) + highlights * bump(0.86))
-    # nunca baja ni se queda plana: pendiente minima y se re-escala para
-    # que vuelva a acabar en 1
-    paso = np.maximum(np.diff(y), 0.12 / (n - 1))
-    y = np.concatenate([[0.0], np.cumsum(paso)])
+    # Nunca se queda plana. Con la pendiente minima de antes (0,12) Oscuros
+    # +100 e Iluminaciones +100 juntos dejaban una meseta entre las dos
+    # campanas: de 112 a 176 salia 132..146, los medios tonos (la piel) casi
+    # de un solo gris — medido en IMG_4205, cara plana y sin color. Ahora la
+    # pendiente no baja de 0,45 (con un minimo suave, sin esquinas) y la luz
+    # que eso anade se descuenta de los tramos que suben mas de la cuenta, no
+    # de toda la curva: asi el ajuste conserva su fuerza donde la tiene
+    pend = np.diff(y) * (n - 1)
+    suelo, k = 0.45, 0.06
+    nueva = suelo + k * np.logaddexp(0.0, (pend - suelo) / k)
+    sobra = np.maximum(nueva - 1.0, 0.0)
+    falta = nueva.sum() - pend.sum()
+    if falta > 0 and sobra.sum() > 0:
+        nueva -= sobra * min(falta / sobra.sum(), 1.0)
+    y = np.concatenate([[0.0], np.cumsum(nueva)])
     return y / y[-1]
 
 
@@ -665,6 +686,43 @@ def _guided_self(lum, r, eps):
         a = cv2.resize(a, (w, h), interpolation=cv2.INTER_LINEAR)
         b = cv2.resize(b, (w, h), interpolation=cv2.INTER_LINEAR)
     return a * lum + b
+
+
+def _chroma_nr(ycc, amount, region=None):
+    """Reduccion de ruido de color, in place sobre los canales Cr/Cb.
+
+    Antes era un desenfoque gaussiano del color: limpiaba, pero corria el
+    rojo de los labios o el azul del sillon por encima de la piel. Ahora es
+    un bilateral conjunto (brillo + color): promedia los puntitos morados y
+    verdes del ruido, que se desvian poco, pero no cruza un cambio de color
+    o de brillo de verdad. El radio va en proporcion a la foto ENTERA, asi
+    limpia lo mismo en pantalla, con zoom y al exportar (antes, a resolucion
+    completa, el mismo valor limpiaba la mitad)."""
+    h, w = ycc.shape[:2]
+    lado = max(region[0], region[1]) if region else max(h, w)
+    sigma = (1.0 + amount * 6.0) * lado / 2200.0
+    # el ruido de color es de grano grueso y el ojo no ve detalle fino en
+    # color: se puede calcular a menor resolucion y ampliar
+    f = int(np.clip(sigma // 3, 1, 4))
+    small = ycc if f == 1 else cv2.resize(
+        ycc, (max(w // f, 1), max(h // f, 1)), interpolation=cv2.INTER_AREA)
+    # COPIA: con f == 1 `small` es la propia foto, y bajar aqui el brillo
+    # de la guia la oscurecia a la mitad
+    guia = np.array(small, dtype=np.float32, copy=True)
+    guia[..., 0] *= 0.5            # el grano de luz no debe frenar el promedio
+    s = max(sigma / f, 0.8)
+    # Un primer suavizado corto: el ruido de color de un movil se desvia
+    # ~0,03 por canal, y el bilateral lo tomaba por "borde" y no lo tocaba
+    # (a 25 solo quitaba el 30 %). Suavizado, el ruido ya no parece borde y
+    # los cambios de color de verdad (labio/piel, gafas) siguen siendolo
+    guia = cv2.GaussianBlur(guia, (0, 0), max(s * 0.5, 0.7))
+    d = int(min(2 * int(np.ceil(2.0 * s)) + 1, 25))
+    out = cv2.bilateralFilter(guia, d, 0.04 + 0.08 * amount, s)
+    for c in (1, 2):
+        ch = out[..., c]
+        if f > 1:
+            ch = cv2.resize(ch, (w, h), interpolation=cv2.INTER_LINEAR)
+        ycc[..., c] = ch
 
 
 def _local_tones(img, shadows, highlights, region=None):
@@ -1251,6 +1309,10 @@ def _apply_profile(img, name, base_lut=None):
     if style is not None:
         slut = pchip_lut(style, LUT_N).astype(np.float32)
         lut = slut[(lut * (LUT_N - 1) + 0.5).astype(np.uint16)]
+    # canal a canal, como Camera Raw: con la curva fija medida ahi (ver
+    # PROFILE_BASE_CURVE) el color de la piel sale igual que en Photoshop
+    # (a 6,3 b 4,6 frente a 6,7 / 4,4 en IMG_4210). Conservar la proporcion
+    # entre canales se probo y la dejaba naranja
     img = lut[_lut_index(img)]
 
     if name == "bw":
@@ -1383,15 +1445,11 @@ def detail_stats(geo, edits, is_raw=False, camera=None, base=None):
     profile = PROFILE_ALIASES.get(e.get("profile", "standard"),
                                   e.get("profile", "standard"))
     if is_raw and profile != RAW_PROFILE:
-        if camera is not None:
-            out["cam_lut"] = camera_base_lut(geo if base is None else base,
-                                             camera)
-        else:
-            out["auto_w"] = auto_tone_weight(img)
-            out["auto_log"] = log_avg_luminance(img)
-            img = auto_tone(img.copy(), weight=out["auto_w"],
-                            log_avg=out["auto_log"])
-        img = _apply_profile(img, profile, out.get("cam_lut"))
+        # igual que en apply_edits: exposicion y curva fija tipo Camera Raw
+        if e["exposure"]:
+            img = np.clip(img * np.float32(2.0 ** (e["exposure"] / EXPOSURE_GAMMA)),
+                          0.0, 1.0)
+        img = _apply_profile(img, profile)
     if e.get("tone_map", 0.0) > 0:
         out["tm_log"] = log_avg_luminance(_apply_calibration(img, e))
     return out
@@ -1497,22 +1555,21 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None,
         img = wb.apply(img, wb_color.correction(e["wb_temp"],
                                                 e.get("wb_tint", 0.0)))
     if is_raw and profile != RAW_PROFILE:
-        cam_lut = st.get("cam_lut")
-        if cam_lut is None and camera is not None and region is None:
-            cam_lut = camera_base_lut(base, camera)
-        if cam_lut is None:
-            img = auto_tone(img, weight=st.get("auto_w"),
-                            log_avg=st.get("auto_log"))
-        elif e["exposure"]:
-            # Con la curva de camara la exposicion va ANTES de ella, como en
-            # Lightroom: en una toma quemada la curva ya aplasta las luces, y
-            # bajar la exposicion despues solo las volvia un gris liso
-            # (medido en IMG_4187). Antes de la curva vuelve el detalle que
-            # el RAW si tiene. Misma cantidad por paso que el deslizador.
+        # Como Camera Raw: exposicion base del DNG (ya puesta al abrir) y
+        # una curva FIJA, la misma para todas las fotos. Antes se copiaba el
+        # JPEG que la camara mete dentro del RAW (`camera_base_lut`), pero
+        # ese JPEG ya viene procesado por zonas (la app Moment/el iPhone
+        # aclaran la cara aparte), y para imitarlo con una sola curva habia
+        # que levantar las sombras x8: piel naranja, velo y ruido (IMG_4210
+        # frente a Photoshop, 2026-09-23). `camera` ya no se usa aqui.
+        if e["exposure"]:
+            # la exposicion va ANTES de la curva, como en Lightroom: en una
+            # toma quemada la curva ya aplasta las luces, y bajar la
+            # exposicion despues solo las volvia un gris liso (IMG_4187)
             img = img * np.float32(2.0 ** (e["exposure"] / EXPOSURE_GAMMA))
             np.clip(img, 0.0, 1.0, out=img)
             tone_exposure = 0.0
-        img = _apply_profile(img, profile, cam_lut)
+        img = _apply_profile(img, profile)
     img = _apply_calibration(img, e)
     _check(should_stop)
 
@@ -1643,10 +1700,7 @@ def apply_edits(base, edits, ai_masks=None, denoised=None, faced=None,
             ycc[..., 0] = cv2.bilateralFilter(
                 ycc[..., 0], 0, 0.03 + nl * 0.22, 2.0 + nl * 3.0)
         if nc:
-            # el ruido de color se difumina en los canales de croma
-            sigma = 1.0 + nc * 6.0
-            ycc[..., 1] = cv2.GaussianBlur(ycc[..., 1], (0, 0), sigma)
-            ycc[..., 2] = cv2.GaussianBlur(ycc[..., 2], (0, 0), sigma)
+            _chroma_nr(ycc, nc, region)
         img = np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0.0, 1.0)
 
     _check(should_stop)

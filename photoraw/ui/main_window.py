@@ -673,7 +673,11 @@ class RenderJob(QRunnable):
             key = None
             if self.cache_tag:
                 # rend2: contraste nuevo y curva base de camara (2026-09-22)
-                key = "rend2-" + diskcache.result_key(self.base, self.cache_tag)
+                # rend3: curva parametrica sin mesetas (2026-09-23)
+                # rend4: ruido de color 25 de fabrica y filtro nuevo
+                # rend6: curva base fija medida en Camera Raw (ya no copia el JPEG)
+                # rend7: ruido de color 1 de fabrica
+                key = "rend7-" + diskcache.result_key(self.base, self.cache_tag)
                 hit = diskcache.load_result(self.path, key)
                 if hit is not None:
                     out = np.ascontiguousarray(hit[0])
@@ -847,7 +851,7 @@ class AIDenoiseJob(AIJob):
         if self.cancelled:
             self.window.on_ai_denoised(str(self.path), None)
             return
-        key = "den-" + diskcache.result_key(self.base)
+        key = "den2-" + diskcache.result_key(self.base)
         hit = diskcache.load_result(self.path, key)
         if hit is not None:
             self.window.on_ai_denoised(str(self.path), hit[0])
@@ -888,7 +892,7 @@ class AIDenoiseFullJob(QRunnable):
     def run(self):
         try:
             base = loader.load_full(self.path)
-            key = "den-" + diskcache.result_key(base)
+            key = "den2-" + diskcache.result_key(base)
             if diskcache.load_result(self.path, key) is None:
                 def cb(p):
                     if self.token["stop"]:
@@ -917,7 +921,7 @@ class HealJob(AIJob):
             return
         # "heal2": desde que el corrector usa LaMa tambien en manchas
         # pequenas, los resultados del relleno clasico guardados no valen
-        key = "heal2-" + diskcache.result_key(self.base, self.strokes)
+        key = "heal4-" + diskcache.result_key(self.base, self.strokes)
         hit = diskcache.load_result(self.path, key)
         if hit is not None:
             self.window.on_healed(str(self.path), hit[0], self.strokes)
@@ -928,10 +932,9 @@ class HealJob(AIJob):
             mask = heal.rasterize_strokes(self.strokes, h, w)
             result = heal.inpaint(self.base, mask,
                                   progress_cb=self.progress("Corrector"))
-            # redondeado a 8 bits (= como se guarda): asi la huella de los
+            # redondeado a 16 bits (= como se guarda): asi la huella de los
             # pasos que parten de la foto corregida no cambia entre sesiones
-            result = (np.clip(result, 0.0, 1.0) * 255.0 + 0.5).astype(
-                np.uint8).astype(np.float32) / 255.0
+            result = diskcache.quantize(result)
             diskcache.save_result(self.path, key, result)
         except ai.Cancelled:
             result = None
@@ -964,7 +967,7 @@ class EraseJob(AIJob):
             return
         # "erase2": desde que las zonas grandes se difunden a 768 px, los
         # rellenos a 512 guardados quedan invalidados a proposito
-        key = "erase2-" + diskcache.result_key(
+        key = "erase3-" + diskcache.result_key(
             self.base, json.dumps(self.ops, sort_keys=True, default=str))
         hit = diskcache.load_result(self.path, key)
         result = self.base
@@ -986,10 +989,9 @@ class EraseJob(AIJob):
             if hit is not None:
                 result = hit[0]
             elif result is not self.base:
-                # redondeado a 8 bits (= como se guarda): huella estable
+                # redondeado a 16 bits (= como se guarda): huella estable
                 # para los pasos que parten de la foto borrada
-                result = (np.clip(result, 0.0, 1.0) * 255.0 + 0.5).astype(
-                    np.uint8).astype(np.float32) / 255.0
+                result = diskcache.quantize(result)
                 diskcache.save_result(self.path, key, result)
         except ai.Cancelled:
             self._give_up()
@@ -1018,7 +1020,7 @@ class AIFaceJob(AIJob):
         if self.cancelled:
             self.window.on_ai_faces_done(str(self.path), None, 0)
             return
-        key = f"fac-{faces.current_model()}-" + diskcache.result_key(self.base)
+        key = f"fac2-{faces.current_model()}-" + diskcache.result_key(self.base)
         hit = diskcache.load_result(self.path, key)
         if hit is not None:
             arr, n = hit
@@ -2186,6 +2188,12 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(effects_box)
         right_layout.addWidget(cal_box)
         right_layout.addStretch()
+        # arrastrar sobre el histograma mueve Negros/Sombras/Exposicion/
+        # Luces/Blancos (los deslizadores ya existen a estas alturas)
+        self.histogram.bind_sliders(self.sliders, self.value_labels)
+        self.histogram.setToolTip(
+            "Arrastra a izquierda o derecha sobre una zona para ajustarla\n"
+            "Doble clic en una zona: la devuelve a cero")
         # los preajustes ya no van al fondo de este panel: tienen su propio
         # panel plegable (ver _build_preset_drawer)
         self.preset_drawer = self._build_preset_drawer()
@@ -5430,11 +5438,10 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _q8(arr):
-        """Redondea a 8 bits, que es como se guarda en el cache. Sin esto la
+        """Redondea como se guarda en el cache (16 bits). Sin esto la
         huella de los pasos siguientes cambiaria entre la exportacion que
         calcula y la que lee de cache, y ya nunca acertarian."""
-        return (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(
-            np.uint8).astype(np.float32) / 255.0
+        return diskcache.quantize(arr)
 
     @staticmethod
     def _export_progress(progress, label):
@@ -5511,7 +5518,7 @@ class MainWindow(QMainWindow):
                             progress_cb=self._export_progress(
                                 progress, f"Corrector en {path.name}…")))
                     base = self._export_ai_step(
-                        path, "heal2-" + diskcache.result_key(base, strokes),
+                        path, "heal4-" + diskcache.result_key(base, strokes),
                         do_heal, f"Corrector en {path.name}…", progress)
                 erase_ops = edits.get("erase_ops")
                 if erase_ops and generative.model_available():
@@ -5531,7 +5538,7 @@ class MainWindow(QMainWindow):
                         return self._q8(out)
                     base = self._export_ai_step(
                         path,
-                        "erase2-" + diskcache.result_key(
+                        "erase3-" + diskcache.result_key(
                             base, json.dumps(erase_ops, sort_keys=True,
                                              default=str)),
                         do_erase,
@@ -5561,7 +5568,7 @@ class MainWindow(QMainWindow):
                 amount = edits.get("ai_denoise", 0.0) / 100.0
                 if (amount > 0 or need_den) and ai.model_available():
                     denoised = self._export_ai_step(
-                        path, "den-" + diskcache.result_key(base),
+                        path, "den2-" + diskcache.result_key(base),
                         lambda b=base: ai.denoise(
                             b, progress_cb=self._export_progress(
                                 progress, f"Ruido IA en {path.name}…")),
@@ -5579,7 +5586,7 @@ class MainWindow(QMainWindow):
                         return (arr, n) if n else (np.zeros((1, 1, 3), np.uint8), 0)
                     faced, n = self._export_ai_step(
                         path,
-                        f"fac-{faces.current_model()}-"
+                        f"fac2-{faces.current_model()}-"
                         + diskcache.result_key(original),
                         do_faces, f"IA rostros en {path.name}…",
                         progress, meta=True)

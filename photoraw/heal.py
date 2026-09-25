@@ -73,7 +73,8 @@ FAST_FRAC = 0.06
 
 
 def _is_small(y0, y1, x0, x1, h, w):
-    return max(y1 - y0, x1 - x0) <= FAST_FRAC * max(h, w)
+    # los pequenos se curan copiando textura (_patch_heal), sin modelo
+    return max(y1 - y0, x1 - x0) <= min(FAST_FRAC, PATCH_FRAC) * max(h, w)
 
 
 def needs_model(strokes, h, w):
@@ -129,6 +130,147 @@ def _fast_inpaint_region(img, mask, y0, y1, x0, x1):
     img[y0:y1, x0:x1] = crop * (1.0 - blend) + out * blend
 
 
+def _smooth_offset(diff, weight, sigma):
+    """Rellena hacia dentro, suave, una diferencia que solo se conoce donde
+    weight > 0 (el anillo de piel alrededor del parche): convolucion
+    normalizada. Da el tono/color que le falta al parche en cada punto."""
+    w = cv2.GaussianBlur(weight.astype(np.float32), (0, 0), sigma)
+    out = np.empty_like(diff)
+    for c in range(diff.shape[2]):
+        out[..., c] = cv2.GaussianBlur(diff[..., c] * weight, (0, 0), sigma)
+    return out / np.maximum(w, 1e-6)[..., None]
+
+
+def _ring(core, width):
+    k = np.ones((2 * width + 1, 2 * width + 1), np.uint8)
+    return (cv2.dilate(core, k) > 0) & (core == 0)
+
+
+# Parches hasta este tamano (fraccion del lado mayor) se curan copiando piel
+# real de al lado, como el pincel corrector de Lightroom; los mayores van a
+# LaMa, que sabe reconstruir cosas que no estan en la foto
+PATCH_FRAC = 0.05
+LAMA_GAMMA = 2.2
+# medido: granitos en piel 0,20-0,48, junto a la comisura del labio 0,66;
+# junto a juntas de baldosa 0,59-0,92 (IMG_4205 / IMG_4170). Junto a una
+# linea tambien se copia (la fuente buena queda A LO LARGO de la linea y el
+# anillo la encuentra); solo las lineas muy marcadas van a LaMa. Con el corte
+# en 0,5 la comisura iba a LaMa y salia la mancha lisa y anaranjada
+COHERENCE_MAX = 0.75
+
+
+def _structure(win, side):
+    """Tensor de estructura de la ventana (jxx, jyy, jxy por pixel), para
+    medir lineas: sumado en una zona, su parte 'con direccion' es lo que
+    tienen de lineas (juntas, bordes) y la traza, todo el detalle."""
+    lum = win @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    # fuera el sombreado suave (la curva de una mejilla tambien "tiene
+    # direccion"): solo cuentan las lineas finas
+    lum = lum - cv2.GaussianBlur(lum, (0, 0), max(side / 3.0, 2.0))
+    lum = cv2.GaussianBlur(lum, (0, 0), max(side / 12.0, 1.0))
+    gx = cv2.Sobel(lum, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(lum, cv2.CV_32F, 0, 1)
+    return gx * gx, gy * gy, gx * gy
+
+
+def _aniso(J, ys, xs):
+    """(energia con direccion, energia total) de los pixeles dados."""
+    jxx, jyy, jxy = (float(j[ys, xs].sum()) for j in J)
+    return np.sqrt((jxx - jyy) ** 2 + 4 * jxy ** 2), jxx + jyy + 1e-12
+
+
+def _patch_heal(img, all_mask, comp, y0, y1, x0, x1):
+    """Corrector clasico: busca cerca una zona que 'encaje' (misma textura
+    alrededor), la copia encima y le corrige tono y color para que empalme
+    con los bordes. Devuelve False si no encuentra de donde copiar.
+
+    Por que: LaMa en piel oscura y con ruido inventa manchas de otro tono
+    (amarillentas, verdosas) y sin grano, que al aclarar la foto al revelar
+    se ven como parches de plastico. Copiando piel de verdad, la textura y
+    el grano son los mismos del resto de la cara."""
+    h, w = img.shape[:2]
+    side = max(y1 - y0, x1 - x0) + 1
+    feather = int(np.clip(side * 0.12, 1.5, 24.0)) + 1
+    ring_w = max(3, side // 3)
+    # margen de la ventana: cabe la cola del desvanecido (~3 sigmas) y el anillo
+    m = 3 * feather + ring_w + 2
+    reach = int(side * 3.2) + m                   # hasta donde busca fuente
+    wy0, wy1 = max(y0 - reach, 0), min(y1 + 1 + reach, h)
+    wx0, wx1 = max(x0 - reach, 0), min(x1 + 1 + reach, w)
+    win = img[wy0:wy1, wx0:wx1]
+    busy = cv2.dilate((all_mask[wy0:wy1, wx0:wx1] > 0).astype(np.uint8),
+                      np.ones((2 * feather + 3,) * 2, np.uint8))
+
+    # la ventana del parche (con su desvanecido y su anillo), en coords de win
+    ty0, ty1 = max(y0 - m, wy0) - wy0, min(y1 + 1 + m, wy1) - wy0
+    tx0, tx1 = max(x0 - m, wx0) - wx0, min(x1 + 1 + m, wx1) - wx0
+    core = (comp[wy0:wy1, wx0:wx1][ty0:ty1, tx0:tx1] > 0).astype(np.uint8)
+    cover = cv2.dilate(core, np.ones((2 * feather + 1,) * 2, np.uint8)) > 0
+    ring = _ring(cover.astype(np.uint8), ring_w) & (busy[ty0:ty1, tx0:tx1] == 0)
+    if ring.sum() < 20:
+        return False
+
+    # se compara textura (paso alto), no tono: el tono se corrige despues
+    sig = max(side / 4.0, 1.5)
+    hp = win - cv2.GaussianBlur(win, (0, 0), sig)
+    ry, rx = np.nonzero(ring)
+
+    # Copiar solo vale en zonas sin lineas (piel, cielo, pared lisa). Si
+    # alrededor hay una direccion dominante (juntas de baldosa, un borde),
+    # copiar pega trozos de linea sueltos y LaMa lo resuelve mejor
+    J = _structure(win, side)
+    lin, tot = _aniso(J, ry + ty0, rx + tx0)
+    if lin / tot > COHERENCE_MAX:
+        return False
+    lin_ref = lin / len(ry)                       # lineas "normales" del entorno
+    tgt = hp[ty0:ty1, tx0:tx1][ry, rx]
+    lum = win @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    tgt_lum = float(lum[ty0:ty1, tx0:tx1][ring].mean())
+    escala = float(np.mean(tgt ** 2)) + 1e-8
+    ch, cw = ty1 - ty0, tx1 - tx0
+    blend = _blend_mask(core)
+    # todo lo que la copia llega a tocar, cola del desvanecido incluida: una
+    # linea en la fuente, aunque sea en el borde, asoma como rayita suelta
+    cy, cx = np.nonzero(blend[..., 0] > 0.02)
+
+    mejor, coste_min = None, np.inf
+    for dist in (1.1, 1.5, 2.0, 2.6, 3.2):
+        for ang in np.linspace(0, 2 * np.pi, 24, endpoint=False):
+            dy = int(round(np.sin(ang) * dist * side))
+            dx = int(round(np.cos(ang) * dist * side))
+            sy0, sx0 = ty0 + dy, tx0 + dx
+            if sy0 < 0 or sx0 < 0 or sy0 + ch > win.shape[0] or sx0 + cw > win.shape[1]:
+                continue
+            if busy[sy0 + cy, sx0 + cx].any():    # la fuente no puede estar retocada
+                continue
+            src = hp[sy0:sy0 + ch, sx0:sx0 + cw]
+            coste = float(np.mean((src[ry, rx] - tgt) ** 2)) / escala
+            # la fuente no debe traer lineas que el entorno no tiene: copiaba
+            # trozos de juntas de baldosa, rayitas sueltas donde no habia nada
+            lin_src = _aniso(J, sy0 + cy, sx0 + cx)[0] / len(cy)
+            coste += 4.0 * max(np.log((lin_src + 1e-9) / (lin_ref + 1e-9))
+                               - np.log(1.5), 0.0)
+            # ni ser de una zona de luz muy distinta (otra parte de la cara)
+            src_lum = float(lum[sy0:sy0 + ch, sx0:sx0 + cw][ring].mean())
+            coste += 2.0 * abs(np.log((src_lum + 0.01) / (tgt_lum + 0.01)))
+            coste += 0.04 * dist                  # a igualdad, lo mas cerca
+            if coste < coste_min:
+                coste_min, mejor = coste, (sy0, sx0)
+    if mejor is None:
+        return False
+
+    sy0, sx0 = mejor
+    tgt_img = win[ty0:ty1, tx0:tx1]
+    src_img = win[sy0:sy0 + ch, sx0:sx0 + cw]
+    # tono y color: la diferencia en el anillo, extendida suave hacia dentro
+    ajuste = _smooth_offset(tgt_img - src_img, ring.astype(np.float32),
+                            max(side * 0.35, 2.0))
+    parche = src_img + ajuste
+    gy0, gx0 = wy0 + ty0, wx0 + tx0
+    img[gy0:gy0 + ch, gx0:gx0 + cw] = tgt_img * (1.0 - blend) + parche * blend
+    return True
+
+
 def _inpaint_region(img, mask, y0, y1, x0, x1):
     """Procesa un recorte y lo funde de vuelta en img (in place)."""
     sess = _get_session()
@@ -137,7 +279,13 @@ def _inpaint_region(img, mask, y0, y1, x0, x1):
     mcrop = mask[y0:y1, x0:x1]
     ch, cw = crop.shape[:2]
 
-    crop512 = cv2.resize(crop, (512, 512), interpolation=cv2.INTER_AREA)
+    # LaMa aprendio con fotos ya reveladas. La base de un RAW esta oscura
+    # (piel a ~0,1) y ahi inventaba manchas amarillentas sin grano que el
+    # revelado luego aclaraba x3. Se le da la zona "revelada" a ojo (a su
+    # blanco y con gamma) y el resultado se devuelve al espacio de la base
+    ref = max(float(np.percentile(crop, 99.5)), 1e-3)
+    crop_n = np.clip(crop / ref, 0.0, 1.0) ** (1.0 / LAMA_GAMMA)
+    crop512 = cv2.resize(crop_n, (512, 512), interpolation=cv2.INTER_AREA)
     mask512 = cv2.resize(mcrop, (512, 512), interpolation=cv2.INTER_NEAREST)
     mask512 = cv2.dilate(mask512, np.ones((5, 5), np.uint8))
 
@@ -155,6 +303,7 @@ def _inpaint_region(img, mask, y0, y1, x0, x1):
     # de alrededor. Se re-amplia con Real-ESRGAN, igual que el borrado
     # generativo, para que la nitidez combine con el resto de la foto.
     out = _sharpen_patch(out, cw, ch)
+    out = np.clip(out, 0.0, 1.0) ** LAMA_GAMMA * ref
 
     # El modelo rellena la ventana ENTERA, no solo lo pintado, asi que fuera
     # de la mascara su respuesta deberia coincidir con la foto. Lo que se
@@ -168,6 +317,16 @@ def _inpaint_region(img, mask, y0, y1, x0, x1):
             sesgo = (float(np.median(crop[..., c][fuera]))
                      - float(np.median(out[..., c][fuera])))
             out[..., c] += sesgo
+        # y ademas el sesgo LOCAL: alrededor del parche mismo (no de toda la
+        # ventana) el tono puede seguir desviado, y eso es lo que se ve como
+        # mancha mas clara o amarillenta en la piel
+        anillo = _ring((mcrop > 0).astype(np.uint8),
+                       max(3, max(y1 - y0, x1 - x0) // 24))
+        if int(anillo.sum()) > 20:
+            my, mx = np.nonzero(mcrop)
+            lado = max(int(np.ptp(my)), int(np.ptp(mx)), 8)
+            out += _smooth_offset(crop - out, anillo.astype(np.float32),
+                                  max(lado * 0.35, 3.0))
         out = np.clip(out, 0.0, 1.0)
 
     # OJO: el desvanecido del borde va en FRACCION del parche, no en pixeles.
@@ -193,7 +352,10 @@ def inpaint(img, mask, progress_cb=None):
         y0, y1 = ys.min(), ys.max()
         x0, x1 = xs.min(), xs.max()
         region_mask = np.where(labels == i, mask, 0)
-        if not model_available():
+        if (max(y1 - y0, x1 - x0) <= PATCH_FRAC * max(h, w)
+                and _patch_heal(result, mask, region_mask, y0, y1, x0, x1)):
+            pass    # curado copiando piel/textura real de al lado
+        elif not model_available():
             # sin modelo descargado: relleno clasico (mejor que nada)
             pad = 24
             _fast_inpaint_region(result, region_mask,

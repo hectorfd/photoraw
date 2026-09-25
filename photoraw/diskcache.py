@@ -171,7 +171,7 @@ def result_key(*parts):
 
 def load_result(path, kind):
     """Resultado IA cacheado como (array, meta) o None si no esta.
-    Los float 0..1 se guardaron como uint8 (invisible: la fuente es de 8 bits)."""
+    Los float 0..1 se guardan como uint16 (los viejos, como uint8)."""
     entry = _entry(path, kind, "npz")
     if entry is None or not entry.exists():
         return None
@@ -180,19 +180,31 @@ def load_result(path, kind):
             arr, f01, meta = z["arr"], bool(z["f01"]), int(z["meta"])
         _touch(entry)
         if f01:
-            arr = np.ascontiguousarray(arr).astype(np.float32) / 255.0
+            tope = 65535.0 if arr.dtype == np.uint16 else 255.0
+            arr = np.ascontiguousarray(arr).astype(np.float32) / tope
         return arr, meta
     except Exception:
         return None
+
+
+def quantize(arr):
+    """Redondea un float 0..1 a la precision con que save_result lo guarda.
+    Hace falta para que la huella de los pasos que parten de este resultado
+    sea la misma lo calcules ahora o lo leas del disco."""
+    return (np.clip(arr, 0.0, 1.0) * 65535.0 + 0.5).astype(
+        np.uint16).astype(np.float32) / 65535.0
 
 
 def save_result(path, kind, arr, meta=0):
     """Guarda un resultado IA (float32 0..1 o uint8) para no recalcularlo."""
     if arr is None:
         return
+    # 16 bits, no 8: la base de un RAW es de 16 bits y muy oscura antes de
+    # revelar (mediana ~0,07 = 18 niveles de 255); guardarla a 8 bits y luego
+    # aclararla x3 dejaba la piel en escalones de color
     f01 = arr.dtype != np.uint8
     if f01:
-        arr = (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+        arr = (np.clip(arr, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
     entry = _entry(path, kind, "npz")
     if entry is not None:
         _write_atomic(entry, lambda f: np.savez(f, arr=arr, f01=f01, meta=meta))

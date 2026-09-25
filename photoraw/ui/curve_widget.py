@@ -179,18 +179,107 @@ class CurveWidget(QWidget):
             self.curveChanged.emit([list(p) for p in self.points])
 
 
+# Zonas del histograma que se pueden arrastrar, como en Lightroom: cada trozo
+# del eje de tonos mueve el deslizador que trabaja sobre esos tonos
+HIST_ZONES = (
+    ("blacks",     "Negros",     0.00, 0.13),
+    ("shadows",    "Sombras",    0.13, 0.35),
+    ("exposure",   "Exposición", 0.35, 0.65),
+    ("highlights", "Luces",      0.65, 0.87),
+    ("whites",     "Blancos",    0.87, 1.00),
+)
+
+
 class HistogramWidget(QWidget):
-    """Widget de histograma RGB + luminancia, estilo Lightroom."""
-    
+    """Widget de histograma RGB + luminancia, estilo Lightroom.
+
+    Ademas de mirar, se puede tocar: al pasar el raton se ilumina la zona
+    (Negros, Sombras, Exposicion, Luces, Blancos) y arrastrando a izquierda
+    o derecha se mueve ese deslizador. Doble clic la devuelve a cero."""
+
+    MARGIN = 4
+
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(80)
         self.setMaximumHeight(100)
+        self.setMouseTracking(True)
         self._hist_r = None
         self._hist_g = None
         self._hist_b = None
         self._hist_lum = None
-    
+        self._sliders = {}        # clave -> (QSlider, etiqueta de valor)
+        self._hover = None        # indice de zona bajo el raton
+        self._drag = None         # (indice, x inicial, valor inicial)
+
+    def bind_sliders(self, sliders, labels):
+        """Los deslizadores de Ajustes que mueve cada zona. Se mueven los de
+        verdad (setValue), asi el guardado y el revelado van por el mismo
+        camino que si los tocaras a mano."""
+        self._sliders = {k: (sliders[k], labels.get(k))
+                         for k, *_ in HIST_ZONES if k in sliders}
+
+    # ---- interaccion ----
+
+    def _zone_at(self, x):
+        w = self.width() - 2 * self.MARGIN
+        t = (x - self.MARGIN) / max(w, 1)
+        for i, (_k, _n, a, b) in enumerate(HIST_ZONES):
+            if t < b or i == len(HIST_ZONES) - 1:
+                return i
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        i = self._zone_at(event.position().x())
+        entry = self._sliders.get(HIST_ZONES[i][0])
+        if entry is None:
+            return
+        self._drag = (i, event.position().x(), entry[0].value())
+        self.setCursor(Qt.SizeHorCursor)
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        x = event.position().x()
+        if self._drag is None:
+            i = self._zone_at(x)
+            if i != self._hover:
+                self._hover = i
+                self.setCursor(Qt.SizeHorCursor if i is not None
+                               else Qt.ArrowCursor)
+                self.update()
+            return
+        i, x0, v0 = self._drag
+        slider = self._sliders[HIST_ZONES[i][0]][0]
+        # recorrer el ancho entero del histograma = medio recorrido del
+        # deslizador: rapido para lo grueso y aun fino pixel a pixel
+        span = slider.maximum() - slider.minimum()
+        w = max(self.width() - 2 * self.MARGIN, 1)
+        nuevo = int(round(v0 + (x - x0) / w * span * 0.5))
+        slider.setValue(min(max(nuevo, slider.minimum()), slider.maximum()))
+        self.update()
+
+    def mouseReleaseEvent(self, _event):
+        if self._drag is not None:
+            self._drag = None
+            self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        """Doble clic en una zona: su ajuste vuelve a cero."""
+        i = self._zone_at(event.position().x())
+        entry = self._sliders.get(HIST_ZONES[i][0])
+        if entry is not None:
+            slider = entry[0]
+            slider.setValue(getattr(slider, "default_value", 0))
+        self._drag = None
+        self.update()
+
+    def leaveEvent(self, _event):
+        if self._drag is None:
+            self._hover = None
+            self.update()
+
     def set_image(self, img):
         """Calcula el histograma de la foto revelada: uint8 (lo que devuelve
         el motor) o float 0..1.
@@ -263,10 +352,46 @@ class HistogramWidget(QWidget):
         draw_hist(self._hist_r, (220, 80, 80))  # Rojo
         draw_hist(self._hist_g, (80, 180, 80))  # Verde
         draw_hist(self._hist_b, (80, 120, 220)) # Azul
-        
+
+        self._paint_zone(pt, w, h)
+
         # Borde sutil
         pt.setPen(QPen(QColor(60, 60, 60)))
         pt.setBrush(Qt.NoBrush)
         pt.drawRect(0, 0, w - 1, h - 1)
-        
+
         pt.end()
+
+    def _paint_zone(self, pt, w, h):
+        """Zona bajo el raton (o la que arrastras): velo claro + su nombre y
+        valor abajo a la izquierda, como en Lightroom."""
+        i = self._drag[0] if self._drag is not None else self._hover
+        if i is None:
+            return
+        key, name, a, b = HIST_ZONES[i]
+        m = self.MARGIN
+        iw = w - 2 * m
+        x0 = m + a * iw
+        pt.setPen(Qt.NoPen)
+        pt.setBrush(QColor(255, 255, 255, 34 if self._drag else 22))
+        pt.drawRect(QRectF(x0, m, (b - a) * iw, h - 2 * m))
+
+        entry = self._sliders.get(key)
+        texto = name
+        if entry is not None and entry[1] is not None:
+            val = entry[1].text()
+            if val and not val.startswith("-") and val not in ("0",):
+                val = "+" + val
+            texto = f"{name}  {val}"
+        f = pt.font()
+        f.setPointSizeF(8.5)
+        f.setBold(True)
+        pt.setFont(f)
+        fm = pt.fontMetrics()
+        tw = fm.horizontalAdvance(texto) + 10
+        th = fm.height() + 4
+        caja = QRectF(m + 3, h - m - th - 3, tw, th)
+        pt.setBrush(QColor(0, 0, 0, 150))
+        pt.drawRoundedRect(caja, 3, 3)
+        pt.setPen(QColor(235, 235, 235))
+        pt.drawText(caja, Qt.AlignCenter, texto)
